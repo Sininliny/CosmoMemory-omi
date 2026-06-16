@@ -1,5 +1,7 @@
 {
-  "unreleased": [],
+  "unreleased": [
+    "Added a local-only dementia MVP mode that routes chat and vision requests to a local VLM instead of cloud AI services"
+  ],
   "releases": [
     {
       "version": "0.11.464",
