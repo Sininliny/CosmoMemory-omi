@@ -1,4 +1,49 @@
-# Omi Backend Setup
+# CosmoMemory Local Backend Setup
+
+For the dementia-focused MVP, do **not** start here. The MVP runs on macOS with:
+
+- the Swift desktop app
+- the local Rust desktop backend
+- a local OpenAI-compatible VLM server
+- no Firebase, Firestore, Redis, ngrok, Cloudflare tunnel, Anthropic, OpenAI, Gemini, or Deepgram requirement
+
+## Local Dementia MVP
+
+1. Start a local VLM server on `127.0.0.1:8000`.
+
+   Recommended lightweight default:
+
+   ```bash
+   cd desktop/macos
+   scripts/run-local-vlm.sh
+   ```
+
+   Any OpenAI-compatible local VLM server is valid if it exposes:
+
+   ```text
+   POST http://127.0.0.1:8000/v1/chat/completions
+   ```
+
+2. Run the macOS app in local-only mode:
+
+   ```bash
+   cd desktop/macos
+   OMI_APP_NAME="omi-cosmo-memory" ./run.sh --local
+   ```
+
+3. Local-only mode uses:
+
+   ```text
+   OMI_LOCAL_ONLY=1
+   LOCAL_VLM_BASE_URL=http://127.0.0.1:8000/v1
+   LOCAL_VLM_MODEL=Qwen/Qwen2.5-VL-3B-Instruct-AWQ
+   ```
+
+The Rust backend exposes `POST /v2/local/chat/completions`, injects the CosmoMemory dementia-support system prompt, and forwards text/image requests to the local VLM. The normal cloud-backed Python backend below is not required for the MVP.
+
+---
+
+# Omi Cloud Backend Setup
 
 This README provides a quick setup guide for the Omi backend. For a comprehensive step-by-step guide with detailed explanations, please refer to the [Backend Setup Documentation](https://docs.omi.me/doc/developer/backend/Backend_Setup).
 
