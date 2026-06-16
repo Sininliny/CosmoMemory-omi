@@ -6,7 +6,7 @@
 // Issue #6594: Pi-mono harness with Omi API proxy for server-side cost control.
 
 use axum::{
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -48,6 +48,15 @@ const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 
 /// Anthropic API version header.
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+
+const COSMO_DEMENTIA_SYSTEM_PROMPT: &str = r#"You are CosmoMemory, a local-first dementia support assistant running on this Mac.
+Priorities, in order:
+1. Fast safety triage. If the person may be in immediate danger, tell them to call local emergency services and contact their caregiver.
+2. Calm active enquiry. Ask one simple question at a time when the situation is unclear.
+3. Orientation support. Use names, place, date/time, reminders, and visible context when available.
+4. Audit-friendly responses. State what you observed, what you inferred, and what action you recommend.
+5. Privacy. Do not suggest uploading private images, audio, or health context to cloud services.
+Do not diagnose disease or replace medical care. Keep responses short, concrete, and easy to follow."#;
 
 /// Per-token costs for Anthropic models (USD per token).
 /// Updated for Claude 4 / Sonnet 4 pricing.
@@ -549,6 +558,109 @@ async fn chat_completions(
     }
 }
 
+// ── Local OpenAI-compatible VLM proxy ───────────────────────────────────────
+
+fn local_vlm_chat_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/chat/completions") {
+        trimmed.to_string()
+    } else {
+        format!("{}/chat/completions", trimmed)
+    }
+}
+
+fn inject_cosmo_system_prompt(messages: &mut Vec<ChatMessage>) {
+    if messages.iter().any(|m| m.role == "system" || m.role == "developer") {
+        return;
+    }
+    messages.insert(
+        0,
+        ChatMessage {
+            role: "system".to_string(),
+            content: Some(json!(COSMO_DEMENTIA_SYSTEM_PROMPT)),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        },
+    );
+}
+
+fn prepare_local_vlm_request(mut req: ChatCompletionRequest, state: &AppState) -> ChatCompletionRequest {
+    req.model = state.config.local_vlm_model.clone();
+    req.temperature.get_or_insert(0.2);
+    if req.max_tokens.is_none() && req.max_completion_tokens.is_none() {
+        req.max_tokens = Some(768);
+    }
+    if state.config.local_vlm_strip_tools {
+        req.tools = None;
+        req.tool_choice = None;
+    }
+    inject_cosmo_system_prompt(&mut req.messages);
+    req
+}
+
+async fn local_chat_completions(
+    State(state): State<AppState>,
+    Json(req): Json<ChatCompletionRequest>,
+) -> Result<Response, StatusCode> {
+    let local_req = prepare_local_vlm_request(req, &state);
+    let upstream_url = local_vlm_chat_url(&state.config.local_vlm_base_url);
+    let is_streaming = local_req.stream;
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(state.config.local_vlm_timeout_seconds))
+        .no_proxy()
+        .build()
+        .map_err(|e| {
+            tracing::error!("local_vlm: failed to build HTTP client: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut builder = client
+        .post(&upstream_url)
+        .header("content-type", "application/json")
+        .json(&local_req);
+
+    if let Some(api_key) = state.config.local_vlm_api_key.as_deref() {
+        builder = builder.bearer_auth(api_key);
+    }
+
+    let upstream_resp = builder.send().await.map_err(|e| {
+        tracing::error!("local_vlm: request to {} failed: {}", upstream_url, e);
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    let status = upstream_resp.status();
+    let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let content_type = upstream_resp
+        .headers()
+        .get("content-type")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or(if is_streaming { "text/event-stream" } else { "application/json" })
+        .to_string();
+
+    if is_streaming {
+        let body = Body::from_stream(upstream_resp.bytes_stream());
+        return Ok(Response::builder()
+            .status(status)
+            .header("content-type", content_type)
+            .body(body)
+            .unwrap());
+    }
+
+    let bytes = upstream_resp.bytes().await.map_err(|e| {
+        tracing::error!("local_vlm: failed to read response body: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Response::builder()
+        .status(status)
+        .header("content-type", content_type)
+        .body(Body::from(bytes))
+        .unwrap())
+}
+
 /// Max attempts for the INITIAL Anthropic request (1 try + 2 retries).
 const ANTHROPIC_MAX_ATTEMPTS: usize = 3;
 
@@ -996,6 +1108,12 @@ pub fn chat_completions_routes() -> Router<AppState> {
         .layer(DefaultBodyLimit::max(CHAT_COMPLETIONS_MAX_BODY_SIZE))
 }
 
+pub fn local_chat_completions_routes() -> Router<AppState> {
+    Router::new()
+        .route("/v2/local/chat/completions", post(local_chat_completions))
+        .layer(DefaultBodyLimit::max(CHAT_COMPLETIONS_MAX_BODY_SIZE))
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1025,6 +1143,56 @@ mod tests {
         assert_eq!(b2, Duration::from_millis(500));
         // Stays bounded (latency-sensitive path).
         assert!(retry_backoff(10) <= Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn local_vlm_url_appends_chat_completions() {
+        assert_eq!(
+            local_vlm_chat_url("http://127.0.0.1:8000/v1"),
+            "http://127.0.0.1:8000/v1/chat/completions"
+        );
+        assert_eq!(
+            local_vlm_chat_url("http://127.0.0.1:8000/v1/chat/completions"),
+            "http://127.0.0.1:8000/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn inject_cosmo_prompt_preserves_existing_system_prompt() {
+        let mut messages = vec![ChatMessage {
+            role: "system".to_string(),
+            content: Some(json!("existing")),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+
+        inject_cosmo_system_prompt(&mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, Some(json!("existing")));
+    }
+
+    #[test]
+    fn inject_cosmo_prompt_when_missing() {
+        let mut messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: Some(json!("Where am I?")),
+            name: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }];
+
+        inject_cosmo_system_prompt(&mut messages);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        assert!(messages[0]
+            .content
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .contains("dementia support assistant"));
     }
 
     #[test]
