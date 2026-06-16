@@ -19,7 +19,22 @@ Trusted by 300,000+ professionals.
 
 ## Quick Start
 
+### CosmoMemory Local Dementia MVP
 
+Run the Mac app with a local VLM core and no cloud backend:
+
+```bash
+# Terminal 1: local OpenAI-compatible VLM
+cd desktop/macos
+scripts/run-local-vlm.sh
+
+# Terminal 2: local app + local Rust backend
+OMI_APP_NAME="omi-cosmo-memory" ./run.sh --local
+```
+
+The local path uses `POST /v2/local/chat/completions` and does not require Firebase, Firestore, Redis, Cloudflare tunnels, Anthropic, OpenAI, Gemini, or Deepgram.
+
+### Upstream Omi Cloud Demo
 
 ```bash
 git clone https://github.com/BasedHardware/omi.git && cd omi/desktop && ./run.sh --yolo
