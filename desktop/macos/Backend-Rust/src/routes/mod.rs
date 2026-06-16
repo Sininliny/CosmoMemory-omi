@@ -22,7 +22,7 @@ pub mod deprecated;
 // ── Active re-exports ─────────────────────────────────────────────────────────
 pub use agent::agent_routes;
 pub use auth::auth_routes;
-pub use chat_completions::chat_completions_routes;
+pub use chat_completions::{chat_completions_routes, local_chat_completions_routes};
 pub use config::config_routes;
 pub use crisp::crisp_routes;
 pub use deprecated::deprecated_routes;
