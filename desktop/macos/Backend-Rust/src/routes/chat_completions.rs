@@ -1158,6 +1158,33 @@ mod tests {
     }
 
     #[test]
+    fn chat_request_serialization_omits_absent_optional_fields() {
+        let req = ChatCompletionRequest {
+            model: "local-model".to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: Some(json!("Where am I?")),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+            }],
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            max_completion_tokens: None,
+            tools: None,
+            tool_choice: None,
+        };
+
+        let serialized = serde_json::to_value(req).unwrap();
+
+        assert!(serialized.get("tools").is_none());
+        assert!(serialized.get("tool_choice").is_none());
+        assert!(serialized.get("temperature").is_none());
+        assert!(serialized["messages"][0].get("tool_calls").is_none());
+    }
+
+    #[test]
     fn inject_cosmo_prompt_preserves_existing_system_prompt() {
         let mut messages = vec![ChatMessage {
             role: "system".to_string(),
