@@ -41,7 +41,7 @@ use routes::{
     // Active (real traffic from current app)
     agent_routes, auth_routes, chat_completions_routes, config_routes, crisp_routes,
     health_routes, proxy_routes, screen_activity_routes, tts_routes, updates_routes,
-    webhook_routes,
+    webhook_routes, local_chat_completions_routes,
     // Deprecated stubs (return 410 Gone — current app uses Python for all data CRUD)
     deprecated_routes,
 };
@@ -117,6 +117,10 @@ async fn main() {
     let config = Config::from_env();
     if let Err(e) = config.validate() {
         tracing::error!("Configuration error: {}", e);
+    }
+    if config.local_only {
+        run_local_only_backend(config).await;
+        return;
     }
 
     // Initialize Firebase Auth
@@ -302,6 +306,41 @@ async fn main() {
     // Start server
     let addr = format!("0.0.0.0:{}", config.port);
     tracing::info!("Starting OMI Desktop Backend on {}", addr);
+
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn run_local_only_backend(config: Config) {
+    let state = AppState {
+        firestore: Arc::new(FirestoreService::local_placeholder(config.encryption_secret.clone())),
+        integrations: Arc::new(IntegrationService::new()),
+        redis: None,
+        config: Arc::new(config.clone()),
+        crisp_session_cache: routes::crisp::new_session_cache(),
+        gemini_rate_limiter: routes::rate_limit::GeminiRateLimiter::new(),
+        chat_rate_limiter: routes::rate_limit::GeminiRateLimiter::for_chat(),
+        vertex_auth: None,
+    };
+
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
+    let app = Router::new()
+        .merge(health_routes())
+        .merge(local_chat_completions_routes())
+        .with_state(state)
+        .layer(cors)
+        .layer(TraceLayer::new_for_http());
+
+    let addr = format!("127.0.0.1:{}", config.port);
+    tracing::info!("Starting local-only CosmoMemory backend on {}", addr);
+    tracing::info!(
+        "Local VLM route: POST /v2/local/chat/completions -> {}/chat/completions",
+        config.local_vlm_base_url.trim_end_matches('/')
+    );
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
