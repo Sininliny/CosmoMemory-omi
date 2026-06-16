@@ -103,6 +103,7 @@ See `.claude/settings.json` for connection details.
 - **No Xcode project** — this is a Swift Package Manager project
 - **Build command**: `xcrun swift build -c debug --package-path Desktop` (the `xcrun` prefix is required to match the SDK version)
 - **Full dev run**: `./run.sh` — builds Swift app, starts Rust backend, starts Cloudflare tunnel, launches app
+- **Local dementia MVP**: `./run.sh --local` — local Rust backend + local VLM, no Firebase/Firestore/Redis/tunnel/cloud AI
 - **Release builds**: Handled entirely by Codemagic CI (no local release script needed)
 - **DO NOT** use bare `swift build` — it will fail with SDK version mismatch
 - **DO NOT** use `xcodebuild` — there is no `.xcodeproj`
