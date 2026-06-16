@@ -219,11 +219,14 @@ for app in "${CONFLICTING_APPS[@]}"; do
 done
 # Also remove any stale dev app bundles nested inside Flutter builds.
 find "$(dirname "$0")/../../app/build" -name "$APP_NAME.app" -type d -exec rm -rf {} + 2>/dev/null || true
-# Kill stale app bundles from other repo clones (e.g. ~/omi-desktop/)
-# These confuse LaunchServices and get launched instead of the /Applications copy.
-find "$HOME" -maxdepth 4 -name "$APP_NAME.app" -type d -not -path "$APP_BUNDLE" -not -path "$APP_PATH" 2>/dev/null | while read stale; do
-    substep "Removing stale clone: $stale"
-    rm -rf "$stale"
+# Kill stale app bundles from common source checkouts. Scanning all of $HOME is
+# slow on machines with large caches or cloud folders and can block local builds.
+for stale_root in "$HOME/Source" "$HOME/Developer" "$HOME/Projects" "$HOME/omi-desktop"; do
+    [ -d "$stale_root" ] || continue
+    find "$stale_root" -maxdepth 4 -name "$APP_NAME.app" -type d -not -path "$APP_BUNDLE" -not -path "$APP_PATH" 2>/dev/null | while read stale; do
+        substep "Removing stale clone: $stale"
+        rm -rf "$stale"
+    done
 done
 
 if [ "${OMI_LOCAL_ONLY:-0}" = "1" ]; then
@@ -434,7 +437,15 @@ if [ -d "$ONNX_FRAMEWORK" ]; then
 fi
 
 # Copy libwebp dylibs and rewrite load paths
-WEBP_LIB="$(pkg-config --variable=libdir libwebp 2>/dev/null)/libwebp.7.dylib"
+WEBP_LIB=""
+if command -v pkg-config >/dev/null 2>&1; then
+    WEBP_LIB="$(pkg-config --variable=libdir libwebp 2>/dev/null)/libwebp.7.dylib"
+elif command -v brew >/dev/null 2>&1; then
+    WEBP_PREFIX="$(brew --prefix webp 2>/dev/null || true)"
+    if [ -n "$WEBP_PREFIX" ]; then
+        WEBP_LIB="$WEBP_PREFIX/lib/libwebp.7.dylib"
+    fi
+fi
 if [ -f "$WEBP_LIB" ]; then
     substep "Bundling libwebp"
     cp "$WEBP_LIB" "$APP_BUNDLE/Contents/Frameworks/libwebp.7.dylib"
