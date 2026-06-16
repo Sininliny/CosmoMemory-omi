@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 // ── Request types (OpenAI-compatible inbound) ──────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
