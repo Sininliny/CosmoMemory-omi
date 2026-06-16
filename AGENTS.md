@@ -124,8 +124,10 @@ The desktop app is a **Swift Package Manager** project (no Xcode project, no `.x
 #### Building & Running
 
 - `cd desktop/macos && ./run.sh` — full local dev (build Swift app + Rust backend + Cloudflare tunnel + launch).
+- `cd desktop/macos && ./run.sh --local` — CosmoMemory dementia MVP mode (local Rust backend + local VLM, no Firebase/Firestore/Redis/tunnel/cloud AI).
 - `cd desktop/macos && ./run.sh --yolo` — quick start against the prod backend, no local services.
 - `OMI_SKIP_BACKEND=1` — app only, use remote backend via `OMI_DESKTOP_API_URL`. `OMI_SKIP_TUNNEL=1` — no Cloudflare tunnel.
+- Local VLM default: `LOCAL_VLM_BASE_URL=http://127.0.0.1:8000/v1`, `LOCAL_VLM_MODEL=Qwen/Qwen2.5-VL-3B-Instruct-AWQ`.
 - Compile-only check: `cd desktop/macos && xcrun swift build -c debug --package-path Desktop` (the `xcrun` prefix is required to match the SDK).
 - **DO NOT** use bare `swift build`, `xcodebuild`, or launch from `build/` directly. Always launch via `cd desktop/macos && ./run.sh` (installs to `/Applications/` and registers with LaunchServices, required for permission "Quit & Reopen").
 - Release builds are handled entirely by Codemagic CI (no local release script).
