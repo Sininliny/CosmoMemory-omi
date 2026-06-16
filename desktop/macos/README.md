@@ -16,6 +16,34 @@ dmg-assets/       DMG installer resources
 
 Requires macOS 14.0+, Rust toolchain, and code signing with an Apple Developer ID.
 
+### Local Dementia MVP
+
+The local MVP keeps the assistant, safety prompt, and vision-language reasoning on the Mac. It does not require Firebase, Firestore, Redis, Cloudflare tunnels, Anthropic, OpenAI, Gemini, or Deepgram.
+
+Start an OpenAI-compatible local VLM first:
+
+```bash
+scripts/run-local-vlm.sh
+```
+
+Then run the app against the local Rust backend:
+
+```bash
+OMI_APP_NAME="omi-cosmo-memory" ./run.sh --local
+```
+
+Useful local VLM overrides:
+
+```bash
+LOCAL_VLM_BASE_URL=http://127.0.0.1:8000/v1
+LOCAL_VLM_MODEL=Qwen/Qwen2.5-VL-3B-Instruct-AWQ
+LOCAL_VLM_STRIP_TOOLS=true
+```
+
+`--local` routes pi-mono chat to `POST /v2/local/chat/completions`, which forwards text/image requests to the local VLM with a dementia-support system prompt.
+
+### Full Cloud Dev
+
 ```bash
 # Run (builds Swift app, starts Rust backend, launches app)
 ./run.sh
