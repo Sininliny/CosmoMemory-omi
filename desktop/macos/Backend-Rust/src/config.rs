@@ -80,11 +80,24 @@ pub struct Config {
     pub vertex_project_id: Option<String>,
     /// GCP region for Vertex AI (default: us-central1)
     pub vertex_location: String,
+    /// Local-only MVP mode: no Firebase, Firestore, paywall, cloud tunnel, or cloud LLM.
+    pub local_only: bool,
+    /// OpenAI-compatible local VLM base URL, usually http://127.0.0.1:8000/v1.
+    pub local_vlm_base_url: String,
+    /// Local VLM model id served by the local runtime.
+    pub local_vlm_model: String,
+    /// Optional API key for local runtimes that still require an Authorization header.
+    pub local_vlm_api_key: Option<String>,
+    /// Strip tool definitions before sending requests to small local VLMs.
+    pub local_vlm_strip_tools: bool,
+    /// Local VLM request timeout in seconds.
+    pub local_vlm_timeout_seconds: u64,
 }
 
 impl Config {
     /// Load configuration from environment variables
     pub fn from_env() -> Self {
+        let local_only = env_bool("OMI_LOCAL_ONLY") || env_bool("COSMO_LOCAL_ONLY");
         Self {
             port: env::var("PORT")
                 .ok()
@@ -149,11 +162,35 @@ impl Config {
                 .ok(),
             vertex_location: env::var("GCP_LOCATION")
                 .unwrap_or_else(|_| "us-central1".to_string()),
+            local_only,
+            local_vlm_base_url: env::var("LOCAL_VLM_BASE_URL")
+                .or_else(|_| env::var("COSMO_VLM_BASE_URL"))
+                .unwrap_or_else(|_| "http://127.0.0.1:8000/v1".to_string()),
+            local_vlm_model: env::var("LOCAL_VLM_MODEL")
+                .or_else(|_| env::var("COSMO_VLM_MODEL"))
+                .unwrap_or_else(|_| "Qwen/Qwen2.5-VL-3B-Instruct-AWQ".to_string()),
+            local_vlm_api_key: env::var("LOCAL_VLM_API_KEY")
+                .or_else(|_| env::var("COSMO_VLM_API_KEY"))
+                .ok(),
+            local_vlm_strip_tools: env_bool_default("LOCAL_VLM_STRIP_TOOLS", true),
+            local_vlm_timeout_seconds: env::var("LOCAL_VLM_TIMEOUT_SECONDS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120),
         }
     }
 
     /// Validate that required configuration is present
     pub fn validate(&self) -> Result<(), String> {
+        if self.local_only {
+            tracing::info!(
+                "Local-only mode enabled: local_vlm_base_url={}, local_vlm_model={}",
+                self.local_vlm_base_url,
+                self.local_vlm_model
+            );
+            return Ok(());
+        }
+
         if self.use_vertex_ai {
             if self.vertex_project_id.is_none() {
                 tracing::warn!("USE_VERTEX_AI=true but GCP_PROJECT_ID/FIREBASE_PROJECT_ID not set");
@@ -187,4 +224,17 @@ impl Config {
             }
         })
     }
+}
+
+fn env_bool(name: &str) -> bool {
+    env_bool_default(name, false)
+}
+
+fn env_bool_default(name: &str, default: bool) -> bool {
+    env::var(name)
+        .map(|value| {
+            let normalized = value.trim().to_ascii_lowercase();
+            matches!(normalized.as_str(), "1" | "true" | "yes" | "on")
+        })
+        .unwrap_or(default)
 }
