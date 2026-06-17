@@ -302,22 +302,6 @@ private struct AttachmentChip: View {
             .padding(.vertical, attachment.isImage ? 0 : 6)
             .background(OmiColors.backgroundTertiary.opacity(attachment.isImage ? 0 : 0.9))
             .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-            .overlay(alignment: .bottom) {
-                if case .failed = attachment.state {
-                    Text("Failed")
-                        .scaledFont(size: 9, weight: .semibold)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Color.red.opacity(0.85))
-                        .clipShape(Capsule())
-                        .padding(2)
-                } else if case .uploading = attachment.state {
-                    ProgressView()
-                        .controlSize(.mini)
-                        .padding(2)
-                }
-            }
 
             Button(action: onRemove) {
                 Image(systemName: "xmark.circle.fill")

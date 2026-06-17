@@ -348,14 +348,14 @@ struct MessageMetadata {
 
 /// A single chat message
 struct ChatMessage: Identifiable {
-    var id: String  // Mutable to sync with server-generated ID
+    var id: String  // Mutable so persisted local IDs can reconcile with visible rows.
     var text: String
     let createdAt: Date
     let sender: ChatSender
     var isStreaming: Bool
     /// Rating: 1 = thumbs up, -1 = thumbs down, nil = no rating
     var rating: Int?
-    /// Whether the message has been synced with the backend (has valid server ID)
+    /// Whether the message has been written to the local chat store.
     var isSynced: Bool
     /// Citations extracted from the AI response
     var citations: [Citation]
@@ -393,7 +393,7 @@ enum ChatSender {
 }
 
 extension ChatMessage {
-    /// Convert a backend message to a local ChatMessage
+    /// Convert a persisted local message to a visible ChatMessage.
     init(from db: ChatMessageDB) {
         self.init(
             id: db.id,
@@ -427,7 +427,6 @@ extension ChatMessage {
                 data: nil,
                 serverId: id,
                 thumbnailURL: thumb,
-                state: .uploaded
             )
         }
     }
@@ -526,16 +525,14 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
     /// The UI should observe this and present BrowserExtensionSetup.
     @Published var needsBrowserExtensionSetup = false
 
-    /// Whether the user is currently viewing the default chat (syncs with Flutter app)
+    /// Whether the user is currently viewing the default local chat.
     @Published var isInDefaultChat = true
 
     /// Working directory for Claude Agent SDK file-system tools (Read, Write, Bash, etc.)
     /// Set by TaskChatCoordinator to point at the user's project directory.
     var workingDirectory: String?
 
-    /// Override app ID for message routing (e.g. "task-chat" to isolate task messages).
-    /// When set, messages are saved with this app_id so the backend routes them
-    /// to the correct session instead of the default chat.
+    /// Override app ID for local message partitioning (e.g. "task-chat").
     var overrideAppId: String?
 
     /// Override the Claude model for this provider's queries.
@@ -543,7 +540,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
     /// e.g. "claude-sonnet-4-6" for faster floating bar responses.
     var modelOverride: String?
 
-    /// Multi-chat mode setting - when false, only default chat is shown (syncs with Flutter)
+    /// Multi-chat mode setting - when false, only default chat is shown.
     /// When true, user can create multiple chat sessions
     @AppStorage("multiChatEnabled") var multiChatEnabled = false
 
@@ -1134,35 +1131,23 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         isLoadingSessions = true
         defer { isLoadingSessions = false }
 
-        let maxAttempts = 3
-        let delays: [UInt64] = [1_000_000_000, 2_000_000_000] // 1s, 2s
-        var lastError: Error?
+        do {
+            sessions = try await LocalChatStorage.shared.getSessions(
+                appId: selectedAppId,
+                starred: showStarredOnly ? true : nil
+            )
+            log("ChatProvider loaded \(sessions.count) local sessions (starred filter: \(showStarredOnly))")
+            sessionsLoadError = nil
 
-        for attempt in 1...maxAttempts {
-            do {
-                sessions = try await APIClient.shared.getChatSessions(
-                    appId: selectedAppId,
-                    starred: showStarredOnly ? true : nil
-                )
-                log("ChatProvider loaded \(sessions.count) sessions (starred filter: \(showStarredOnly))")
-                sessionsLoadError = nil
-
-                // If we have sessions and no current session, select the most recent
-                if currentSession == nil, let mostRecent = sessions.first {
-                    await selectSession(mostRecent)
-                }
-                return
-            } catch {
-                lastError = error
-                logError("Failed to load chat sessions (attempt \(attempt)/\(maxAttempts))", error: error)
-                if attempt < maxAttempts {
-                    try? await Task.sleep(nanoseconds: delays[attempt - 1])
-                }
+            // If we have sessions and no current session, select the most recent
+            if currentSession == nil, let mostRecent = sessions.first {
+                await selectSession(mostRecent)
             }
+        } catch {
+            sessions = []
+            sessionsLoadError = "Failed to load local chats."
+            logError("Failed to load local chat sessions", error: error)
         }
-
-        sessions = []
-        sessionsLoadError = lastError?.localizedDescription ?? "Failed to load chats. Check your connection and try again."
     }
 
     /// Toggle the starred filter and reload sessions
@@ -1180,60 +1165,20 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
     ///   - appId: Override app ID (e.g. "task-chat" to isolate task sessions from default chat)
     func createNewSession(title: String? = nil, skipGreeting: Bool = false, appId: String? = nil) async -> ChatSession? {
         do {
-            let session = try await APIClient.shared.createChatSession(title: title, appId: appId ?? selectedAppId)
+            let session = try await LocalChatStorage.shared.createSession(title: title, appId: appId ?? selectedAppId)
             sessions.insert(session, at: 0)
             currentSession = session
             isInDefaultChat = false
             messages = []
             hasMoreMessages = false
-            log("Created new chat session: \(session.id)")
+            log("Created local chat session: \(session.id)")
             AnalyticsManager.shared.chatSessionCreated()
-
-            // Generate initial greeting message (skip for task chats that send their own context)
-            if !skipGreeting {
-                await fetchInitialMessage(for: session)
-            }
 
             return session
         } catch {
-            logError("Failed to create chat session", error: error)
-            errorMessage = "Failed to create new chat"
+            logError("Failed to create local chat session", error: error)
+            errorMessage = "Failed to create local chat"
             return nil
-        }
-    }
-
-    /// Fetch and display an initial greeting message for a new session
-    private func fetchInitialMessage(for session: ChatSession) async {
-        do {
-            let response = try await APIClient.shared.getInitialMessage(
-                sessionId: session.id,
-                appId: selectedAppId
-            )
-
-            // Add the AI greeting to messages (already has server ID)
-            let greetingMessage = ChatMessage(
-                id: response.messageId,
-                text: response.message,
-                createdAt: Date(),
-                sender: .ai,
-                isStreaming: false,
-                rating: nil,
-                isSynced: true
-            )
-            messages.append(greetingMessage)
-
-            // Update session preview
-            if let index = sessions.firstIndex(where: { $0.id == session.id }) {
-                sessions[index].preview = response.message
-            }
-
-            // Track analytics
-            AnalyticsManager.shared.initialMessageGenerated(hasApp: selectedAppId != nil)
-
-            log("Added initial greeting message for session \(session.id)")
-        } catch {
-            // Non-fatal: session still works without greeting
-            logError("Failed to fetch initial message", error: error)
         }
     }
 
@@ -1248,7 +1193,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         hasMoreMessages = false
 
         do {
-            let persistedMessages = try await APIClient.shared.getMessages(
+            let persistedMessages = try await LocalChatStorage.shared.getMessages(
                 sessionId: session.id,
                 limit: messagesPageSize
             )
@@ -1256,9 +1201,9 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                 .sorted(by: { $0.createdAt < $1.createdAt })
             // If we got a full page, there might be more messages
             hasMoreMessages = persistedMessages.count == messagesPageSize
-            log("ChatProvider loaded \(messages.count) messages for session \(session.id), hasMore: \(hasMoreMessages)")
+            log("ChatProvider loaded \(messages.count) local messages for session \(session.id), hasMore: \(hasMoreMessages)")
         } catch {
-            logError("Failed to load messages for session", error: error)
+            logError("Failed to load local messages for session", error: error)
             messages = []
         }
 
@@ -1276,13 +1221,13 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             let offset = messages.count
             let olderMessages: [ChatMessageDB]
             if let sessionId = currentSessionId {
-                olderMessages = try await APIClient.shared.getMessages(
+                olderMessages = try await LocalChatStorage.shared.getMessages(
                     sessionId: sessionId,
                     limit: messagesPageSize,
                     offset: offset
                 )
             } else {
-                olderMessages = try await APIClient.shared.getMessages(
+                olderMessages = try await LocalChatStorage.shared.getMessages(
                     appId: selectedAppId,
                     limit: messagesPageSize,
                     offset: offset
@@ -1302,9 +1247,9 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
 
             // Check if there are more
             hasMoreMessages = olderMessages.count == messagesPageSize
-            log("Loaded \(newMessages.count) more messages, total: \(messages.count), hasMore: \(hasMoreMessages)")
+            log("Loaded \(newMessages.count) more local messages, total: \(messages.count), hasMore: \(hasMoreMessages)")
         } catch {
-            logError("Failed to load more messages", error: error)
+            logError("Failed to load more local messages", error: error)
         }
 
         isLoadingMoreMessages = false
@@ -1317,7 +1262,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
     func deleteSession(_ session: ChatSession) async {
         deletingSessionIds.insert(session.id)
         do {
-            try await APIClient.shared.deleteChatSession(sessionId: session.id)
+            try await LocalChatStorage.shared.deleteSession(sessionId: session.id)
             deletingSessionIds.remove(session.id)
             sessions.removeAll { $0.id == session.id }
 
@@ -1331,19 +1276,19 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                 }
             }
 
-            log("Deleted chat session: \(session.id)")
+            log("Deleted local chat session: \(session.id)")
             AnalyticsManager.shared.chatSessionDeleted()
         } catch {
             deletingSessionIds.remove(session.id)
-            logError("Failed to delete chat session", error: error)
-            errorMessage = "Failed to delete chat"
+            logError("Failed to delete local chat session", error: error)
+            errorMessage = "Failed to delete local chat"
         }
     }
 
     /// Toggle starred status for a session
     func toggleStarred(_ session: ChatSession) async {
         do {
-            let updated = try await APIClient.shared.updateChatSession(
+            let updated = try await LocalChatStorage.shared.updateSession(
                 sessionId: session.id,
                 starred: !session.starred
             )
@@ -1367,7 +1312,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
     /// Update session title (user-initiated rename)
     func updateSessionTitle(_ session: ChatSession, title: String) async {
         do {
-            let updated = try await APIClient.shared.updateChatSession(
+            let updated = try await LocalChatStorage.shared.updateSession(
                 sessionId: session.id,
                 title: title
             )
@@ -1653,7 +1598,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         // Get user name from AuthService
         let userName = AuthService.shared.displayName.isEmpty ? "there" : AuthService.shared.givenName
 
-        // Use the context string from backend (includes memories + conversations)
+        // Use the prepared context string (includes memories + conversations)
         // Fall back to just memories if context is empty
         let contextSection = contextString.isEmpty ? formatMemoriesSection() : contextString
 
@@ -1870,18 +1815,24 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
 
     /// Initialize chat: fetch sessions and load messages
     func initialize() async {
-        // Seed cumulative Omi AI cost from backend now that auth is ready (background, no latency)
-        Task.detached(priority: .background) { [weak self] in
-            guard let serverCost = await APIClient.shared.fetchTotalOmiAICost() else { return }
-            guard let self else { return }
-            await MainActor.run {
-                // Always trust the server value — it's the authoritative total
-                self.omiAICumulativeCostUsd = serverCost
-                log("ChatProvider: Seeded Omi AI cumulative cost from backend: $\(String(format: "%.4f", serverCost))")
-                // Show upgrade prompt if over threshold but don't block chat
-                if self.bridgeMode != BridgeMode.userClaude.rawValue && serverCost >= 50.0 {
-                    log("ChatProvider: Omi AI cost at $\(String(format: "%.2f", serverCost)) on startup — showing upgrade prompt")
-                    self.showOmiThresholdAlert = true
+        if DesktopBackendEnvironment.isLocalOnly {
+            omiAICumulativeCostUsd = 0
+            showOmiThresholdAlert = false
+        } else {
+            // Seed cumulative Omi AI cost from backend now that auth is ready (background, no latency).
+            // This is account/billing state, not chat history.
+            Task.detached(priority: .background) { [weak self] in
+                guard let serverCost = await APIClient.shared.fetchTotalOmiAICost() else { return }
+                guard let self else { return }
+                await MainActor.run {
+                    // Always trust the server value — it's the authoritative total
+                    self.omiAICumulativeCostUsd = serverCost
+                    log("ChatProvider: Seeded Omi AI cumulative cost from backend: $\(String(format: "%.4f", serverCost))")
+                    // Show upgrade prompt if over threshold but don't block chat
+                    if self.bridgeMode != BridgeMode.userClaude.rawValue && serverCost >= 50.0 {
+                        log("ChatProvider: Omi AI cost at $\(String(format: "%.2f", serverCost)) on startup — showing upgrade prompt")
+                        self.showOmiThresholdAlert = true
+                    }
                 }
             }
         }
@@ -1892,7 +1843,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             // Start in default chat mode
             await switchToDefaultChat()
         } else {
-            // Single chat mode: just load default chat messages (syncs with Flutter)
+            // Single chat mode: just load default local chat messages.
             isLoadingSessions = false
             await loadDefaultChatMessages()
         }
@@ -2099,7 +2050,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         }
     }
 
-    /// Switch to the default chat (messages without session_id, syncs with Flutter app)
+    /// Switch to the default local chat (messages without session_id).
     func switchToDefaultChat() async {
         currentSession = nil
         isInDefaultChat = true
@@ -2107,45 +2058,32 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         log("Switched to default chat")
     }
 
-    /// Load messages for the default chat (no session filter - compatible with Flutter)
-    /// Retries up to 3 times on failure.
+    /// Load messages for the default local chat (no session filter).
     func loadDefaultChatMessages() async {
         isLoading = true
         errorMessage = nil
         hasMoreMessages = false
 
-        let maxAttempts = 3
-        let delays: [UInt64] = [1_000_000_000, 2_000_000_000] // 1s, 2s
-        var lastError: Error?
-
-        for attempt in 1...maxAttempts {
-            do {
-                let persistedMessages = try await APIClient.shared.getMessages(
-                    appId: selectedAppId,
-                    limit: messagesPageSize
-                )
-                messages = persistedMessages.map(ChatMessage.init(from:))
-                    .sorted(by: { $0.createdAt < $1.createdAt })
-                hasMoreMessages = persistedMessages.count == messagesPageSize
-                sessionsLoadError = nil
-                log("ChatProvider loaded \(messages.count) default chat messages, hasMore: \(hasMoreMessages)")
-                isLoading = false
-                return
-            } catch {
-                lastError = error
-                logError("Failed to load default chat messages (attempt \(attempt)/\(maxAttempts))", error: error)
-                if attempt < maxAttempts {
-                    try? await Task.sleep(nanoseconds: delays[attempt - 1])
-                }
-            }
+        do {
+            let persistedMessages = try await LocalChatStorage.shared.getMessages(
+                appId: selectedAppId,
+                limit: messagesPageSize
+            )
+            messages = persistedMessages.map(ChatMessage.init(from:))
+                .sorted(by: { $0.createdAt < $1.createdAt })
+            hasMoreMessages = persistedMessages.count == messagesPageSize
+            sessionsLoadError = nil
+            log("ChatProvider loaded \(messages.count) local default chat messages, hasMore: \(hasMoreMessages)")
+        } catch {
+            messages = []
+            sessionsLoadError = "Failed to load local messages."
+            logError("Failed to load local default chat messages", error: error)
         }
 
-        messages = []
-        sessionsLoadError = lastError?.localizedDescription ?? "Failed to load messages. Check your connection and try again."
         isLoading = false
     }
 
-    // MARK: - Cross-Platform Message Sync
+    // MARK: - Local Message Refresh
 
     /// Prevents overlapping fetches when activation + Cmd+R fire back-to-back.
     private let pollGate = ReentrancyGate()
@@ -2153,8 +2091,8 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
     /// Defense-in-depth against the saveMessage / pollForNewMessages
     /// race. `isSending` is released *before* the AI message save
     /// completes (intentional — to unblock the next query), which opens a
-    /// window where the poll can observe the just-saved AI message and
-    /// treat it as new-from-another-platform. The existing 200-char
+    /// window where the refresh can observe the just-saved AI message and
+    /// treat it as a separate persisted row. The existing 200-char
     /// text-prefix merge at `pollForNewMessages` catches most of these,
     /// but a counter-based suppression eliminates the race window
     /// entirely instead of relying on text heuristics that fail on short
@@ -2166,32 +2104,27 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
     /// Set when a `pollForNewMessages` cycle bailed *because* a save was
     /// in flight. `pollForNewMessages` is only triggered by activation /
     /// Cmd+R (there is no periodic poll), so a dropped cycle would leave
-    /// messages from other platforms unfetched until the next activation.
+    /// newly-persisted local rows unrefreshed until the next activation.
     /// `pendingSaves.onDrained` re-runs the poll once saves finish, but
     /// only when this flag says one was actually deferred.
     private var pollDeferredDuringSave = false
 
-    /// Fetch new messages from other platforms (e.g. mobile).
-    /// Merges new messages into the existing array without disrupting the UI.
+    /// Refresh local messages after activation or Cmd+R.
     private func pollForNewMessages() async {
         // Prevent overlapping fetches from activation + Cmd+R firing together
         guard pollGate.tryEnter() else { return }
         defer { pollGate.exit() }
-        // Skip if user is signed out (tokens are cleared)
-        guard AuthState.shared.isSignedIn else { return }
-        // Skip if in auth backoff period (recent 401 errors)
-        guard !AuthBackoffTracker.shared.shouldSkipRequest() else { return }
         // Skip if we're actively sending. Note: isSending is released *before* the AI
-        // message is saved to the backend (to unblock the next query). This means the
-        // poll can run while saveMessage() is still in-flight — see the race note below.
+        // message is saved locally (to unblock the next query). This means the
+        // refresh can run while saveMessage() is still in-flight.
         //
         // `pendingSaves.isActive` closes the same race window from the save side
         // — any in-flight saveMessage (user msg, AI msg, follow-up, partial-on-error,
         // proactive notification) keeps the poll suppressed until it lands. This is
-        // defense-in-depth over the 200-char text-prefix merge below at lines ~2192.
+        // defense-in-depth over the 200-char text-prefix merge below.
         guard !isSending, !isLoading, !isLoadingSessions else { return }
-        // A save in flight means a local message hasn't reconciled its
-        // server ID yet — defer rather than risk observing it as new.
+        // A save in flight means a visible message may not have adopted its
+        // persisted ID yet — defer rather than risk observing it as new.
         // Mark the cycle deferred so `pendingSaves.onDrained` re-runs it.
         guard !pendingSaves.isActive else { pollDeferredDuringSave = true; return }
         // Skip if messages haven't been loaded yet (initial load not done)
@@ -2211,14 +2144,12 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             let persistedMessages: [ChatMessageDB]
 
             if let session = currentSession {
-                // Multi-chat: fetch for current session
-                persistedMessages = try await APIClient.shared.getMessages(
+                persistedMessages = try await LocalChatStorage.shared.getMessages(
                     sessionId: session.id,
                     limit: messagesPageSize
                 )
             } else {
-                // Default chat
-                persistedMessages = try await APIClient.shared.getMessages(
+                persistedMessages = try await LocalChatStorage.shared.getMessages(
                     appId: selectedAppId,
                     limit: messagesPageSize
                 )
@@ -2228,13 +2159,12 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             // a proactive assistant message appended via appendAssistantMessage
             // (FloatingControlBarWindow) after this poll already passed the
             // pendingSaves guard above. That message can be in the batch we
-            // just fetched, carrying a server ID the local copy hasn't adopted
+            // just fetched, carrying a persisted ID the visible copy hasn't adopted
             // yet. Re-check here and bail this cycle; the next poll after the
             // save lands reconciles it by ID. Without this, the post-guard
             // window stays open for the proactive paths. Mark the cycle
             // deferred so the drain handler re-runs it — otherwise the
-            // just-fetched batch (including any genuine new messages from
-            // other platforms) would be dropped until the next activation.
+            // just-fetched batch would be dropped until the next activation.
             guard !pendingSaves.isActive else { pollDeferredDuringSave = true; return }
 
             // Build a lookup of existing IDs for fast O(1) checks.
@@ -2243,13 +2173,13 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             var genuinelyNewMessages: [ChatMessage] = []
 
             for dbMsg in persistedMessages {
-                // Fast path: already in memory by server ID — skip.
+                // Fast path: already in memory by persisted ID — skip.
                 if existingIds.contains(dbMsg.id) { continue }
 
-                // Race-condition guard: isSending is released before the backend save
+                // Race-condition guard: isSending is released before the local save
                 // completes (intentionally, to unblock the next query). If this poll
                 // fires between "isSending = false" and "messages[i].id = response.id",
-                // the backend message lands here with a server ID that doesn't match
+                // the persisted message lands here with an ID that doesn't match
                 // the local UUID still sitting in messages[]. Without this check we'd
                 // append a duplicate.
                 //
@@ -2262,29 +2192,23 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                 if let localIndex = messages.firstIndex(where: {
                     !$0.isSynced && $0.sender == dbSender && String($0.text.prefix(200)) == dbPrefix
                 }) {
-                    // Merge: adopt the server ID so future polls find it by ID.
+                    // Merge: adopt the persisted ID so future refreshes find it by ID.
                     messages[localIndex].id = dbMsg.id
                     messages[localIndex].isSynced = true
-                    log("ChatProvider poll: merged backend ID \(dbMsg.id) into local message (was unsynced)")
+                    log("ChatProvider poll: merged persisted ID \(dbMsg.id) into local message")
                     continue
                 }
 
-                // Genuinely new message from another platform (phone, web, etc.)
                 genuinelyNewMessages.append(ChatMessage(from: dbMsg))
             }
 
             if !genuinelyNewMessages.isEmpty {
-                log("ChatProvider poll: found \(genuinelyNewMessages.count) new message(s) from other platforms")
+                log("ChatProvider poll: found \(genuinelyNewMessages.count) local message(s)")
                 messages.append(contentsOf: genuinelyNewMessages)
                 messages.sort(by: { $0.createdAt < $1.createdAt })
             }
-            AuthBackoffTracker.shared.reportSuccess()
         } catch {
-            if case APIError.unauthorized = error {
-                AuthBackoffTracker.shared.reportAuthFailure()
-            }
-            // Silent failure — polling errors shouldn't disrupt the user
-            logError("ChatProvider poll failed", error: error)
+            logError("ChatProvider local refresh failed", error: error)
         }
     }
 
@@ -2335,7 +2259,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         )
         messages.append(userMessage)
 
-        // Persist to backend and sync server ID back to prevent poll duplicates.
+        // Persist locally and mark synced so rating buttons can appear.
         //
         // saveMessage site 1 of 5: user follow-up message sent
         // mid-query. Fire-and-forget Task. `pendingSaves` guards the
@@ -2346,11 +2270,12 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         pendingSaves.begin()
         Task { [weak self] in
             do {
-                let response = try await APIClient.shared.saveMessage(
+                let response = try await LocalChatStorage.shared.saveMessage(
                     text: trimmedText,
                     sender: "human",
                     appId: capturedAppId,
-                    sessionId: capturedSessionId
+                    sessionId: capturedSessionId,
+                    id: localId
                 )
                 await MainActor.run {
                     if let index = self?.messages.firstIndex(where: { $0.id == localId }) {
@@ -2359,10 +2284,10 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                     }
                     self?.pendingSaves.end()
                 }
-                log("Saved follow-up message to backend: \(response.id)")
+                log("Saved follow-up message locally: \(response.id)")
             } catch {
                 await MainActor.run { self?.pendingSaves.end() }
-                logError("Failed to persist follow-up message", error: error)
+                logError("Failed to persist local follow-up message", error: error)
             }
         }
 
@@ -2392,11 +2317,12 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         pendingSaves.begin()
         Task { [weak self] in
             do {
-                let response = try await APIClient.shared.saveMessage(
+                let response = try await LocalChatStorage.shared.saveMessage(
                     text: trimmedText,
                     sender: "ai",
                     appId: capturedAppId,
-                    sessionId: capturedSessionId
+                    sessionId: capturedSessionId,
+                    id: localId
                 )
                 await MainActor.run {
                     if let index = self?.messages.firstIndex(where: { $0.id == localId }) {
@@ -2405,10 +2331,10 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                     }
                     self?.pendingSaves.end()
                 }
-                log("Saved assistant message to backend: \(response.id)")
+                log("Saved assistant message locally: \(response.id)")
             } catch {
                 await MainActor.run { self?.pendingSaves.end() }
-                logError("Failed to persist assistant message", error: error)
+                logError("Failed to persist local assistant message", error: error)
             }
         }
 
@@ -2417,8 +2343,8 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
 
     // MARK: - Pending Attachments
 
-    /// Stage attachments for the next message and kick off background upload.
-    /// Caps the total at `kMaxChatAttachments` (matches Flutter's 4-file limit).
+    /// Stage local attachments for the next message.
+    /// Caps the total at `kMaxChatAttachments`.
     func addAttachments(_ attachments: [ChatAttachment]) {
         let room = max(0, kMaxChatAttachments - pendingAttachments.count)
         guard room > 0 else {
@@ -2427,69 +2353,15 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         }
         let toAdd = Array(attachments.prefix(room))
         pendingAttachments.append(contentsOf: toAdd)
-        let capturedAppId = overrideAppId ?? selectedAppId
-        for attachment in toAdd {
-            uploadAttachment(id: attachment.id, appId: capturedAppId)
-        }
     }
 
     func removePendingAttachment(id: String) {
         pendingAttachments.removeAll { $0.id == id }
     }
 
-    /// Upload a single staged attachment in the background. The user can send
-    /// the message before this completes — `sendMessage` will await the upload.
-    private func uploadAttachment(id: String, appId: String?) {
-        Task { [weak self] in
-            guard let self = self,
-                  let attachment = await MainActor.run(body: {
-                      self.pendingAttachments.first(where: { $0.id == id })
-                  })
-            else { return }
-
-            // For non-image files we still need bytes — load them lazily here
-            // (we skipped this at add-time to keep the UI responsive).
-            let data: Data? = attachment.data
-            guard let bytes = data else {
-                await MainActor.run {
-                    self.setAttachmentState(id: id, state: .failed("File could not be read"))
-                }
-                return
-            }
-            do {
-                let resp = try await APIClient.shared.uploadChatFiles(
-                    [(data: bytes, fileName: attachment.fileName, mimeType: attachment.mimeType)],
-                    appId: appId
-                )
-                guard let server = resp.first else {
-                    throw APIError.invalidResponse
-                }
-                await MainActor.run {
-                    if let idx = self.pendingAttachments.firstIndex(where: { $0.id == id }) {
-                        self.pendingAttachments[idx].serverId = server.id
-                        self.pendingAttachments[idx].thumbnailURL = server.thumbnail
-                        if let mime = server.mimeType { self.pendingAttachments[idx].mimeType = mime }
-                        if let name = server.name { self.pendingAttachments[idx].fileName = name }
-                        self.pendingAttachments[idx].state = .uploaded
-                    }
-                }
-            } catch {
-                logError("ChatProvider: attachment upload failed", error: error)
-                await MainActor.run {
-                    self.setAttachmentState(id: id, state: .failed(error.localizedDescription))
-                }
-            }
-        }
-    }
-
-    private func setAttachmentState(id: String, state: ChatAttachment.State) {
-        guard let idx = pendingAttachments.firstIndex(where: { $0.id == id }) else { return }
-        pendingAttachments[idx].state = state
-    }
-
     /// Serialize attachments to the JSON string stored in `metadata` on the
-    /// backend. Only the fields needed to re-render thumbnails are kept; image
-    /// bytes never travel through this channel.
+    /// local database. Only lightweight display fields are kept; file bytes
+    /// are used for the active prompt and not persisted in chat history.
     private func encodeAttachmentsMetadata(_ attachments: [ChatAttachment]) -> String? {
         let items: [[String: Any]] = attachments.map { att in
             var dict: [String: Any] = [
@@ -2507,37 +2379,16 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         return str
     }
 
-    /// Block until all currently-uploading attachments either succeed or fail.
-    /// Returns `false` if any failed — caller surfaces an error and aborts.
-    private func awaitPendingUploads() async -> Bool {
-        let timeoutNs: UInt64 = 60 * 1_000_000_000  // 60s safety bound
-        let start = DispatchTime.now().uptimeNanoseconds
-        while pendingAttachments.contains(where: {
-            if case .uploading = $0.state { return true }
-            return false
-        }) {
-            if DispatchTime.now().uptimeNanoseconds - start > timeoutNs {
-                errorMessage = "Attachment upload timed out."
-                return false
-            }
-            try? await Task.sleep(nanoseconds: 100_000_000)
-        }
-        return !pendingAttachments.contains(where: {
-            if case .failed = $0.state { return true }
-            return false
-        })
-    }
-
     // MARK: - Send Message
 
     /// Send a message and get AI response via Claude Agent SDK bridge
-    /// Persists both user and AI messages to backend
+    /// Persists both user and AI messages locally
     /// - Parameters:
     ///   - text: The message text
     ///   - model: Optional model override for this query (e.g. "claude-sonnet-4-6" for floating bar)
     func sendMessage(_ text: String, model: String? = nil, isFollowUp: Bool = false, systemPromptSuffix: String? = nil, systemPromptPrefix: String? = nil, systemPromptStyle: ChatSystemPromptStyle = .main, sessionKey: String? = nil, resume: String? = nil, imageData: Data? = nil) async {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty else { return }
+        guard !trimmedText.isEmpty || !pendingAttachments.isEmpty else { return }
 
         // Guard against concurrent sendMessage calls.
         // The bridge uses a single message continuation, so concurrent queries
@@ -2616,18 +2467,8 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             }
         }
 
-        // Wait for staged attachments to finish uploading so we can include their
-        // server IDs in the saved-message metadata. The bubble shows immediately
-        // via the local thumbnail data — we only block sending until the upload
-        // settles so persistence stays consistent across sessions.
         var attachmentsForMessage: [ChatAttachment] = []
         if !pendingAttachments.isEmpty {
-            let ok = await awaitPendingUploads()
-            if !ok {
-                isSending = false
-                errorMessage = "Some attachments failed to upload. Remove them and try again."
-                return
-            }
             attachmentsForMessage = pendingAttachments
             pendingAttachments.removeAll()
         }
@@ -2635,14 +2476,15 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             ? nil
             : encodeAttachmentsMetadata(attachmentsForMessage)
 
-        // Save user message to backend and add to UI.
+        let promptText = trimmedText.isEmpty ? "Please review the attached file." : trimmedText
+
+        // Save user message locally and add to UI.
         // (skip for follow-ups — sendFollowUp already did both)
         //
         // The save is fire-and-forget (unstructured Task) so it doesn't block
-        // the ACP query from starting. This is safe because isSending=true for
-        // the entire duration of the ACP query, so the poll timer is suppressed
-        // the whole time — by the time isSending is released the user message
-        // save has almost always already completed and its ID has been synced.
+        // the ACP query from starting. `isSending` and `pendingSaves` keep the
+        // local refresh from observing the row before the visible message adopts
+        // its persisted ID.
         let userMessageId = UUID().uuidString
         let isFirstMessage = messages.isEmpty
         let capturedSessionId = sessionId
@@ -2650,21 +2492,20 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         if !isFollowUp {
             // saveMessage site 3 of 5: user message at turn start.
             // Fire-and-forget Task launched before the bridge query so
-            // it doesn't block streaming. `isSending` already gates the
-            // poll until the AI response lands, but `pendingSaves`
-            // provides defense-in-depth in case the save outlives the
-            // bridge query (slow backend, retry, etc.).
+            // it doesn't block streaming. `pendingSaves` keeps local refresh
+            // from racing the ID reconciliation.
             pendingSaves.begin()
             Task { [weak self] in
                 do {
-                    let response = try await APIClient.shared.saveMessage(
+                    let response = try await LocalChatStorage.shared.saveMessage(
                         text: trimmedText,
                         sender: "human",
                         appId: capturedAppId,
                         sessionId: capturedSessionId,
-                        metadata: attachmentMetadataJSON
+                        metadata: attachmentMetadataJSON,
+                        id: userMessageId
                     )
-                    // Adopt the server ID (local UUID → server ID) and mark synced.
+                    // Adopt the persisted ID (local UUID -> database ID) and mark saved.
                     // isSynced=true enables rating buttons on the message bubble.
                     await MainActor.run {
                         if let index = self?.messages.firstIndex(where: { $0.id == userMessageId }) {
@@ -2673,10 +2514,10 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                         }
                         self?.pendingSaves.end()
                     }
-                    log("Saved user message to backend: \(response.id)")
+                    log("Saved user message locally: \(response.id)")
                 } catch {
                     await MainActor.run { self?.pendingSaves.end() }
-                    logError("Failed to persist user message", error: error)
+                    logError("Failed to persist local user message", error: error)
                     // Non-critical - continue with chat
                 }
             }
@@ -2699,9 +2540,9 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
 
         // Create a placeholder AI message shown immediately in the UI while
         // streaming. It starts with a local UUID (isSynced=false, no rating buttons).
-        // Lifecycle: local UUID → streaming text appended token by token →
-        // isStreaming=false → isSending=false → backend save → ID replaced with
-        // server ID, isSynced=true (rating buttons appear).
+        // Lifecycle: local UUID -> streaming text appended token by token ->
+        // isStreaming=false -> isSending=false -> local save -> ID reconciled,
+        // isSynced=true (rating buttons appear).
         let aiMessageId = UUID().uuidString
         let aiMessage = ChatMessage(
             id: aiMessageId,
@@ -2843,7 +2684,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             }
 
             let queryResult = try await agentBridge.query(
-                prompt: trimmedText,
+                prompt: promptText,
                 systemPrompt: systemPrompt,
                 sessionKey: isOnboarding ? "onboarding" : (sessionKey ?? "main"),
                 cwd: workingDirectory,
@@ -2905,23 +2746,22 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             }
 
             // Release the sending lock as soon as the AI response is visible in the
-            // UI. Backend persistence is slow (can timeout at 30s+) and should not
+            // UI. Local persistence is intentionally decoupled so it does not
             // block the user from making new queries to Claude.
             //
-            // IMPORTANT: releasing isSending here opens a race window with the poll
-            // timer. The poll can now fetch backend messages while saveMessage() is
-            // still in-flight. The AI message still has a local UUID at this point
+            // IMPORTANT: releasing isSending here opens a small race window with
+            // local refresh. The AI message still has a local UUID at this point
             // (isSynced=false). pollForNewMessages() handles this by merging the
-            // backend copy into the local message rather than appending a duplicate.
+            // saved copy into the local message rather than appending a duplicate.
             isSending = false
             isStopping = false
 
-            // Save AI response to backend. aiMessageId is captured above so we can
+            // Save AI response locally. aiMessageId is captured above so we can
             // locate the right message even if the user has started a new query by
             // the time this completes.
             //
             // After save: update the in-memory message's ID from local UUID to the
-            // server-assigned ID, and mark isSynced=true. This is the normal path
+            // persisted ID, and mark isSynced=true. This is the normal path
             // (no race). The poll's merge logic handles the case where the poll fires
             // before this update runs.
             let textToSave = queryResult.text.isEmpty ? messageText : queryResult.text
@@ -2931,7 +2771,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                 // already released a few lines above to unblock the
                 // next query, so the poll could fire DURING this await
                 // and observe the just-saved AI message before the
-                // local UUID has been updated to the server ID below.
+                // local UUID has been updated to the persisted ID below.
                 // The counter closes that window — `pendingSaves`
                 // stays active until the save lands AND the in-memory
                 // ID has been synced. The pre-existing 200-char
@@ -2945,23 +2785,24 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                 defer { pendingSaves.end() }
                 do {
                     let toolMetadata = serializeToolCallMetadata(messageId: aiMessageId)
-                    let response = try await APIClient.shared.saveMessage(
+                    let response = try await LocalChatStorage.shared.saveMessage(
                         text: textToSave,
                         sender: "ai",
                         appId: capturedAppId,
                         sessionId: capturedSessionId,
-                        metadata: toolMetadata
+                        metadata: toolMetadata,
+                        id: aiMessageId
                     )
-                    // Adopt the server ID so future polls find this message by ID
+                    // Adopt the persisted ID so future refreshes find this message by ID
                     // (existingIds check in pollForNewMessages). isSynced=true enables
                     // thumbs-up/down rating UI.
                     if let syncIndex = messages.firstIndex(where: { $0.id == aiMessageId }) {
                         messages[syncIndex].id = response.id
                         messages[syncIndex].isSynced = true
                     }
-                    log("Saved and synced AI response: \(response.id) (session=\(capturedSessionId ?? "nil"), tool_calls=\(toolMetadata != nil ? "yes" : "none"))")
+                    log("Saved and synced local AI response: \(response.id) (session=\(capturedSessionId ?? "nil"), tool_calls=\(toolMetadata != nil ? "yes" : "none"))")
                 } catch {
-                    logError("Failed to persist AI response", error: error)
+                    logError("Failed to persist local AI response", error: error)
                 }
             }
 
@@ -3030,7 +2871,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             }
 
             // Fire-and-forget: check if user's message mentions goal progress
-            let chatText = trimmedText
+            let chatText = promptText
             Task.detached(priority: .background) {
                 await GoalsAIService.shared.extractProgressFromAllGoals(text: chatText)
             }
@@ -3065,12 +2906,13 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                     pendingSaves.begin()
                     Task { [weak self] in
                         do {
-                            let response = try await APIClient.shared.saveMessage(
+                            let response = try await LocalChatStorage.shared.saveMessage(
                                 text: partialText,
                                 sender: "ai",
                                 appId: capturedAppId,
                                 sessionId: capturedSessionId,
-                                metadata: partialToolMetadata
+                                metadata: partialToolMetadata,
+                                id: aiMessageId
                             )
                             await MainActor.run {
                                 if let syncIndex = self?.messages.firstIndex(where: { $0.id == aiMessageId }) {
@@ -3079,10 +2921,10 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
                                 }
                                 self?.pendingSaves.end()
                             }
-                            log("Saved partial AI response to backend: \(response.id)")
+                            log("Saved partial AI response locally: \(response.id)")
                         } catch {
                             await MainActor.run { self?.pendingSaves.end() }
-                            logError("Failed to persist partial AI response", error: error)
+                            logError("Failed to persist local partial AI response", error: error)
                         }
                     }
                 }
@@ -3125,7 +2967,7 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
         }
     }
 
-    /// Generate a title for the session using LLM
+    /// Generate a local title for the session from the first user message.
     private func generateSessionTitle(sessionId: String) async {
         // Need at least 2 messages (user + AI) for meaningful title
         guard messages.count >= 2 else {
@@ -3133,31 +2975,27 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             return
         }
 
-        // Convert messages to the format expected by the API
-        let messageTuples: [(text: String, sender: String)] = messages.map { msg in
-            (text: msg.text, sender: msg.sender == .user ? "human" : "ai")
-        }
-
         do {
-            let response = try await APIClient.shared.generateSessionTitle(
+            let title = await LocalChatStorage.shared.generateTitle(from: messages)
+            let updated = try await LocalChatStorage.shared.updateSession(
                 sessionId: sessionId,
-                messages: messageTuples
+                title: title
             )
 
             // Update session in list
             if let index = sessions.firstIndex(where: { $0.id == sessionId }) {
-                sessions[index].title = response.title
+                sessions[index] = updated
             }
 
             // Update current session
             if currentSession?.id == sessionId {
-                currentSession?.title = response.title
+                currentSession = updated
             }
 
-            log("Generated session title: \(response.title)")
+            log("Generated local session title: \(title)")
             AnalyticsManager.shared.sessionTitleGenerated()
         } catch {
-            logError("Failed to generate session title", error: error)
+            logError("Failed to generate local session title", error: error)
             // Non-fatal - session continues with default title
         }
     }
@@ -3392,9 +3230,9 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             messages[index].rating = rating
         }
 
-        // Persist to backend
+        // Persist locally
         do {
-            try await APIClient.shared.rateMessage(messageId: messageId, rating: rating)
+            try await LocalChatStorage.shared.rateMessage(messageId: messageId, rating: rating)
             log("Rated message \(messageId) with rating: \(String(describing: rating))")
 
             // Track analytics
@@ -3423,9 +3261,9 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             log("Cleared default chat messages")
             Task {
                 do {
-                    _ = try await APIClient.shared.deleteMessages(appId: selectedAppId)
+                    _ = try await LocalChatStorage.shared.deleteMessages(appId: selectedAppId)
                 } catch {
-                    logError("Failed to clear default chat messages", error: error)
+                    logError("Failed to clear local default chat messages", error: error)
                 }
             }
         } else {
@@ -3439,14 +3277,14 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             currentSession = nil
             messages = []
 
-            // Delete old session in background (don't await — backend is slow)
+            // Delete old session in the background so the UI can reset immediately.
             if let session = sessionToDelete {
                 Task {
                     do {
-                        try await APIClient.shared.deleteChatSession(sessionId: session.id)
-                        log("Background deleted chat session: \(session.id)")
+                        try await LocalChatStorage.shared.deleteSession(sessionId: session.id)
+                        log("Background deleted local chat session: \(session.id)")
                     } catch {
-                        logError("Failed to background delete chat session", error: error)
+                        logError("Failed to background delete local chat session", error: error)
                     }
                 }
             }

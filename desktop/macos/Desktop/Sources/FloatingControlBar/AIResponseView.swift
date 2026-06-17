@@ -19,7 +19,6 @@ struct AIResponseView: View {
     var onEscape: (() -> Void)?
     var onSendFollowUp: ((String) -> Void)?
     var onRate: ((String, Int?) -> Void)?
-    var onShareLink: (() async -> String?)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -85,19 +84,12 @@ struct AIResponseView: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-            if let shareFeedbackMessage, showShareFeedback {
-                shareFeedbackBanner
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                    .accessibilityLabel(shareFeedbackMessage)
-            }
-
             if !isLoading && !isVoiceFollowUp {
                 followUpInputView
             }
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .animation(.spring(response: 0.28, dampingFraction: 0.85), value: showShareFeedback)
         .onExitCommand {
             onEscape?()
         }
@@ -381,22 +373,8 @@ struct AIResponseView: View {
 
     // MARK: - Follow-Up Input
 
-    @State private var showShareFeedback = false
-    @State private var shareFeedbackMessage: String?
-    @State private var shareFeedbackHideWorkItem: DispatchWorkItem?
-    @State private var isSharingLink = false
-
     private var followUpInputView: some View {
         HStack(spacing: 6) {
-            Button(action: { shareLink() }) {
-                Image(systemName: showShareFeedback ? "checkmark" : "arrowshape.turn.up.right")
-                    .scaledFont(size: 13)
-                    .foregroundColor(showShareFeedback ? .green : .secondary)
-            }
-            .buttonStyle(.plain)
-            .help("Copy share link")
-            .disabled(isSharingLink)
-
             TextField("Ask follow up...", text: $followUpText)
                 .textFieldStyle(.plain)
                 .scaledFont(size: 13)
@@ -420,59 +398,6 @@ struct AIResponseView: View {
             .disabled(followUpText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .buttonStyle(.plain)
         }
-    }
-
-    private var shareFeedbackBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-                .scaledFont(size: 12, weight: .semibold)
-                .foregroundColor(.green)
-
-            Text("Share link copied to your clipboard")
-                .scaledFont(size: 12, weight: .medium)
-                .foregroundColor(.white)
-
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.green.opacity(0.18))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(Color.green.opacity(0.35), lineWidth: 1)
-        )
-        .cornerRadius(8)
-    }
-
-    private func shareLink() {
-        guard !isSharingLink else { return }
-        isSharingLink = true
-        Task {
-            if let url = await onShareLink?() {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(url, forType: .string)
-                AnalyticsManager.shared.shareAction(category: "floating_bar_share_link")
-                showShareSuccessFeedback()
-            }
-            isSharingLink = false
-        }
-    }
-
-    private func showShareSuccessFeedback() {
-        shareFeedbackHideWorkItem?.cancel()
-        shareFeedbackMessage = "Share link copied to your clipboard"
-        withAnimation {
-            showShareFeedback = true
-        }
-
-        let workItem = DispatchWorkItem {
-            withAnimation {
-                showShareFeedback = false
-                shareFeedbackMessage = nil
-            }
-        }
-        shareFeedbackHideWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.8, execute: workItem)
     }
 
     private func sendFollowUp() {

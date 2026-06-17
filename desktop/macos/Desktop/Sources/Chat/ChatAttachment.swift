@@ -5,29 +5,20 @@ import Foundation
 ///
 /// Lifecycle:
 ///   1. User selects a file (NSOpenPanel or drag-drop) → init with local URL/data.
-///   2. ChatProvider uploads it via APIClient.uploadChatFiles → server fills
-///      `serverId`, `thumbnailURL`, `mimeType`, sets `state = .uploaded`.
-///   3. On send, the first image's raw `data` is passed to the agent bridge as
-///      `imageBase64`; all uploaded `serverId`s are persisted in message metadata
-///      so the bubble can re-render thumbnails after a reload.
+///   2. On send, the first image's raw `data` is passed to the agent bridge.
+///   3. Message metadata stores lightweight local display info only. Bytes never
+///      leave the machine as part of chat history persistence.
 struct ChatAttachment: Identifiable, Equatable {
-    enum State: Equatable {
-        case uploading
-        case uploaded
-        case failed(String)
-    }
-
     let id: String
     var fileName: String
     var mimeType: String
     /// Local image bytes — populated for images so the agent bridge can see them
-    /// and so the user gets an instant thumbnail without waiting for upload.
+    /// and so the user gets an instant thumbnail.
     var data: Data?
-    /// Server-assigned file id (matches Flutter's MessageFile.id).
+    /// Optional legacy/server id. Local-only chat leaves this nil.
     var serverId: String?
-    /// Public thumbnail URL returned by /v2/files (only set for images).
+    /// Optional legacy thumbnail URL for messages saved before local-only chat.
     var thumbnailURL: String?
-    var state: State
 
     init(
         id: String = UUID().uuidString,
@@ -35,8 +26,7 @@ struct ChatAttachment: Identifiable, Equatable {
         mimeType: String,
         data: Data? = nil,
         serverId: String? = nil,
-        thumbnailURL: String? = nil,
-        state: State = .uploading
+        thumbnailURL: String? = nil
     ) {
         self.id = id
         self.fileName = fileName
@@ -44,17 +34,10 @@ struct ChatAttachment: Identifiable, Equatable {
         self.data = data
         self.serverId = serverId
         self.thumbnailURL = thumbnailURL
-        self.state = state
     }
 
     var isImage: Bool {
         mimeType.hasPrefix("image/")
-    }
-
-    /// True once the backend has accepted the upload and returned an id.
-    var isUploaded: Bool {
-        if case .uploaded = state { return true }
-        return false
     }
 
     /// Build a ChatAttachment from a local file URL, reading bytes if it's a
@@ -65,8 +48,7 @@ struct ChatAttachment: Identifiable, Equatable {
         let mime = mimeType(for: url)
         var bytes: Data? = nil
         if mime.hasPrefix("image/") {
-            // Cap at 25 MB to avoid copying huge files into memory; backend limit
-            // is enforced server-side anyway.
+            // Cap at 25 MB to avoid copying huge files into memory.
             if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                 let size = attrs[.size] as? NSNumber, size.intValue <= 25 * 1024 * 1024
             {

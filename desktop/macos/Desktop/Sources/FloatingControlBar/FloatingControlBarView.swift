@@ -13,7 +13,6 @@ struct FloatingControlBarView: View {
     var onEscape: () -> Void
     var onClearVisibleConversation: () -> Void
     var onRate: ((String, Int?) -> Void)?
-    var onShareLink: (() async -> String?)?
 
     @State private var isHovering = false
     private let conversationTransition = Animation.spring(response: 0.32, dampingFraction: 0.86)
@@ -463,8 +462,7 @@ struct FloatingControlBarView: View {
                 }
                 onSendQuery(message)
             },
-            onRate: onRate,
-            onShareLink: onShareLink
+            onRate: onRate
         )
         .transition(
             .asymmetric(

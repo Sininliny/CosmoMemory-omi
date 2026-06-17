@@ -58,7 +58,6 @@ class FloatingControlBarWindow: NSPanel, NSWindowDelegate {
     var onHide: (() -> Void)?
     var onSendQuery: ((String) -> Void)?
     var onRate: ((String, Int?) -> Void)?
-    var onShareLink: (() async -> String?)?
 
     override init(
         contentRect: NSRect, styleMask style: NSWindow.StyleMask,
@@ -156,8 +155,7 @@ class FloatingControlBarWindow: NSPanel, NSWindowDelegate {
             onCloseAI: { [weak self] in self?.closeAIConversation() },
             onEscape: { [weak self] in self?.handleEscapeKey() },
             onClearVisibleConversation: { [weak self] in self?.clearVisibleConversationFromUI() },
-            onRate: { [weak self] messageId, rating in self?.onRate?(messageId, rating) },
-            onShareLink: { [weak self] in await self?.onShareLink?() }
+            onRate: { [weak self] messageId, rating in self?.onRate?(messageId, rating) }
         ).environmentObject(state)
 
         hostingView = FloatingBarHostingView(rootView: AnyView(
@@ -1043,39 +1041,6 @@ class FloatingControlBarManager {
             }
         }
 
-        barWindow.onShareLink = { [weak barWindow] in
-            guard let barWindow = barWindow else { return nil }
-            // Share the visible floating-bar exchange history in chat order.
-            var messageIds: [String] = []
-            for exchange in barWindow.state.chatHistory {
-                if let questionMessageId = exchange.questionMessageId {
-                    messageIds.append(questionMessageId)
-                }
-                if exchange.aiMessage.isSynced {
-                    messageIds.append(exchange.aiMessage.id)
-                }
-            }
-            if let currentQuestionMessageId = barWindow.state.currentQuestionMessageId {
-                messageIds.append(currentQuestionMessageId)
-            }
-            if let current = barWindow.state.currentAIMessage, current.isSynced {
-                messageIds.append(current.id)
-            }
-            let orderedUniqueMessageIds = messageIds.reduce(into: [String]()) { ids, messageId in
-                if !ids.contains(messageId) {
-                    ids.append(messageId)
-                }
-            }
-            guard !orderedUniqueMessageIds.isEmpty else { return nil }
-            do {
-                let response = try await APIClient.shared.shareChatMessages(messageIds: orderedUniqueMessageIds)
-                return response.url
-            } catch {
-                log("Failed to get chat share link: \(error)")
-                return nil
-            }
-        }
-
         // Observe recording state
         recordingCancellable = appState.$isTranscribing
             .combineLatest(appState.$isSavingConversation)
@@ -1509,11 +1474,10 @@ class FloatingControlBarManager {
     private func persistNotificationMessageIfNeeded(_ notification: FloatingBarNotification) {
         guard storedNotificationMessages[notification.id] == nil else { return }
 
-        // Also append the notification as an assistant message in the main chat
-        // history provider so it is visible on the home-page chat and synced to
-        // the backend. The floating bar still uses its own provider for follow-up
-        // questions (see openNotificationConversation), so this append does not
-        // affect the floating-bar session in any way.
+        // Also append the notification as an assistant message in the main local
+        // chat history so it is visible on the home page. The floating bar still
+        // uses its own provider for follow-up questions (see openNotificationConversation),
+        // so this append does not affect the floating-bar session in any way.
         if let historyProvider = historyChatProvider {
             let bodyText = notification.message.trimmingCharacters(in: .whitespacesAndNewlines)
             let messageText = bodyText.isEmpty ? notification.title : bodyText

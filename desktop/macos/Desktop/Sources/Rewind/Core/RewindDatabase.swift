@@ -2156,6 +2156,40 @@ actor RewindDatabase {
             }
         }
 
+        migrator.registerMigration("createLocalChatTables") { db in
+            try db.execute(sql: """
+                CREATE TABLE local_chat_sessions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    title TEXT NOT NULL,
+                    preview TEXT,
+                    createdAt DATETIME NOT NULL,
+                    updatedAt DATETIME NOT NULL,
+                    appId TEXT,
+                    messageCount INTEGER NOT NULL DEFAULT 0,
+                    starred BOOLEAN NOT NULL DEFAULT 0
+                )
+            """)
+
+            try db.execute(sql: """
+                CREATE TABLE local_chat_messages (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    text TEXT NOT NULL,
+                    createdAt DATETIME NOT NULL,
+                    sender TEXT NOT NULL,
+                    appId TEXT,
+                    sessionId TEXT,
+                    rating INTEGER,
+                    reported BOOLEAN NOT NULL DEFAULT 0,
+                    metadata TEXT
+                )
+            """)
+
+            try db.create(index: "idx_local_chat_sessions_app_updated", on: "local_chat_sessions", columns: ["appId", "updatedAt"])
+            try db.create(index: "idx_local_chat_sessions_starred", on: "local_chat_sessions", columns: ["starred"])
+            try db.create(index: "idx_local_chat_messages_app_created", on: "local_chat_messages", columns: ["appId", "createdAt"])
+            try db.create(index: "idx_local_chat_messages_session_created", on: "local_chat_messages", columns: ["sessionId", "createdAt"])
+        }
+
         try migrator.migrate(queue)
     }
 

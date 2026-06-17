@@ -248,6 +248,19 @@ struct DesktopHomeView: View {
             .onReceive(
               NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             ) { _ in
+              // Auto-start monitoring when returning to app if screen analysis is enabled
+              // but monitoring is not running. Handles the case where the user granted
+              // screen recording permission in System Settings and switched back.
+              let plugin = ProactiveAssistantsPlugin.shared
+              plugin.refreshScreenRecordingPermission()
+              appState.checkScreenRecordingPermission()
+              if AssistantSettings.shared.screenAnalysisEnabled && !plugin.isMonitoring {
+                if plugin.hasScreenRecordingPermission {
+                  log("DesktopHomeView: Permission available on app active — starting monitoring")
+                  plugin.startMonitoring { _, _ in }
+                }
+              }
+
               guard !DesktopBackendEnvironment.isLocalOnly else { return }
 
               // Cooldown: only refresh conversations if last activation was 60+ seconds ago
@@ -255,17 +268,6 @@ struct DesktopHomeView: View {
               if PollingConfig.shouldAllowActivationRefresh(now: now, lastRefresh: lastActivationRefresh) {
                 lastActivationRefresh = now
                 Task { await appState.refreshConversations() }
-              }
-              // Auto-start monitoring when returning to app if screen analysis is enabled
-              // but monitoring is not running. Handles the case where the user granted
-              // screen recording permission in System Settings and switched back.
-              let plugin = ProactiveAssistantsPlugin.shared
-              if AssistantSettings.shared.screenAnalysisEnabled && !plugin.isMonitoring {
-                plugin.refreshScreenRecordingPermission()
-                if plugin.hasScreenRecordingPermission {
-                  log("DesktopHomeView: Permission available on app active — starting monitoring")
-                  plugin.startMonitoring { _, _ in }
-                }
               }
             }
             .onChange(of: apiKeyService.isLoaded) { loaded in

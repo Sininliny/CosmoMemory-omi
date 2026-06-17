@@ -1083,6 +1083,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
           name: .showUsageLimitPopup, object: nil, userInfo: ["reason": "trial_expired"])
         return
       }
+      ProactiveAssistantsPlugin.shared.refreshScreenRecordingPermission()
       if !ProactiveAssistantsPlugin.shared.hasScreenRecordingPermission {
         // No permission — revert toggle and open preferences
         sender.state = .off

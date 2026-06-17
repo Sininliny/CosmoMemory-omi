@@ -443,10 +443,10 @@ actor AIUserProfileService {
 
     private func fetchMessages() async -> [String] {
         do {
-            let messages = try await APIClient.shared.getMessages(limit: 30)
+            let messages = try await LocalChatStorage.shared.getMessages(limit: 30)
             return messages.map { "[\($0.sender)] \($0.text)" }
         } catch {
-            log("AIUserProfileService: Failed to fetch messages: \(error.localizedDescription)")
+            log("AIUserProfileService: Failed to fetch local messages: \(error.localizedDescription)")
             return []
         }
     }
