@@ -503,6 +503,14 @@ class AppState: ObservableObject {
     // Load API key from environment or .env file
     loadEnvironment()
 
+    if DesktopBackendEnvironment.isLocalOnly {
+      UserDefaults.standard.set(true, forKey: "auth_isSignedIn")
+      UserDefaults.standard.set("local@cosmomemory", forKey: "auth_userEmail")
+      UserDefaults.standard.set("local", forKey: "auth_userId")
+      UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+      self.hasCompletedOnboarding = true
+    }
+
     // Setup lifecycle observers for saving conversations
     setupLifecycleObservers()
 
