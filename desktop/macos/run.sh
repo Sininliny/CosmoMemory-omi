@@ -665,6 +665,12 @@ if [ -n "$SIGN_IDENTITY" ]; then
     if [ "$USE_FALLBACK_ENTITLEMENTS" = true ]; then
         cp Desktop/Omi.entitlements /tmp/omi-local-dev.entitlements
         /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.applesignin" /tmp/omi-local-dev.entitlements 2>/dev/null || true
+        # Local named/ad-hoc bundles load third-party frameworks that are not
+        # signed by the same Apple team as the app. Keep hardened runtime, but
+        # disable library validation so dyld does not reject Sparkle/Sentry at
+        # launch with "different Team IDs".
+        /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" /tmp/omi-local-dev.entitlements 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :com.apple.security.cs.disable-library-validation true" /tmp/omi-local-dev.entitlements
         rm -f "$PROFILE_PATH"
         EFFECTIVE_ENTITLEMENTS="/tmp/omi-local-dev.entitlements"
     fi
