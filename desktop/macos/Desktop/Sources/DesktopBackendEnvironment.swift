@@ -5,6 +5,11 @@ enum DesktopBackendEnvironment {
   static let developmentPythonAPIURL = "https://api.omiapi.com/"
   static let developmentRustBackendURL = "https://desktop-backend-dt5lrfkkoa-uc.a.run.app/"
 
+  static var isLocalOnly: Bool {
+    isAffirmative(currentEnvironmentValue("OMI_LOCAL_ONLY"))
+      || isAffirmative(currentEnvironmentValue("COSMO_LOCAL_ONLY"))
+  }
+
   static var shouldUseDevelopmentBackends: Bool {
     shouldUseDevelopmentBackends(
       bundleIdentifier: AppBuild.bundleIdentifier,

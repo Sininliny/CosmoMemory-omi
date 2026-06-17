@@ -5,11 +5,11 @@ import Foundation
 /// (one holder at a time); this one allows multiple concurrent holders
 /// and reports "is anything in flight right now?" via `isActive`.
 ///
-/// Used by `ChatProvider` to prevent the cross-platform message poll
+/// Used by `ChatProvider` to prevent the local message refresh
 /// from running while any `saveMessage(...)` is mid-flight. The poll
-/// reads backend state to detect messages sent from other devices; if
-/// it fires between a local save's request and its response, it can
-/// observe the just-saved message and treat it as new. The existing
+/// reads the local chat store; if it fires between a local save and
+/// visible-state reconciliation, it can observe the just-saved message
+/// and treat it as new. The existing
 /// 200-char text-prefix merge at `pollForNewMessages` catches most of
 /// these, but a counter-based suppression is defense-in-depth —
 /// eliminates the race window entirely instead of relying on text
@@ -20,7 +20,7 @@ import Foundation
 /// counter.begin()
 /// Task {
 ///     do {
-///         let response = try await APIClient.shared.saveMessage(...)
+///         let response = try await LocalChatStorage.shared.saveMessage(...)
 ///         await MainActor.run {
 ///             // … sync state update …
 ///             self.counter.end()

@@ -14,9 +14,13 @@ Usage: ./run.sh [options]
 Build and run the Omi Desktop dev app with local backend services.
 
 Options (via environment variables):
+  ./run.sh --local        Fully local MVP mode: local Rust backend + local VLM, no cloud auth/tunnel
+  OMI_LOCAL_ONLY=1        Same as --local
   OMI_SKIP_BACKEND=1      Skip starting Rust backend (use remote backend via OMI_DESKTOP_API_URL)
   OMI_SKIP_TUNNEL=1        Skip Cloudflare tunnel (use OMI_DESKTOP_API_URL from .env directly)
   PORT=10201                Rust backend port (default: 10201, never use 8080)
+  LOCAL_VLM_BASE_URL=http://127.0.0.1:8000/v1
+  LOCAL_VLM_MODEL=Qwen/Qwen2.5-VL-3B-Instruct-AWQ
   OMI_APP_NAME="Omi Dev"   App name (default: "Omi Dev")
   OMI_PYTHON_API_URL="..."  Python backend URL (subscriptions, payments, etc; default: https://api.omi.me)
   OMI_SIGN_IDENTITY="..."  Code signing identity (auto-detected if not set)
@@ -36,6 +40,7 @@ Port allocation (avoid 8080 to prevent port conflicts):
 
 Examples:
   ./run.sh                                  # Full local dev (backend + tunnel + app)
+  ./run.sh --local                          # Local dementia MVP (no cloud services)
   OMI_SKIP_BACKEND=1 ./run.sh               # App only (backend running elsewhere)
   OMI_SKIP_TUNNEL=1 ./run.sh                # No Cloudflare tunnel (use direct URL)
   ./run.sh --yolo                            # Quick start: use prod backend, no local services
@@ -69,6 +74,14 @@ if [ "$1" = "--yolo" ]; then
     echo ""
 
     apply_yolo_env
+fi
+
+if [ "$1" = "--local" ]; then
+    export OMI_LOCAL_ONLY=1
+    export OMI_SKIP_TUNNEL=1
+    export OMI_PYTHON_API_URL=""
+    export LOCAL_VLM_BASE_URL="${LOCAL_VLM_BASE_URL:-http://127.0.0.1:8000/v1}"
+    export LOCAL_VLM_MODEL="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct-AWQ}"
 fi
 
 # Clear system OPENAI_API_KEY so .env takes precedence
@@ -206,14 +219,19 @@ for app in "${CONFLICTING_APPS[@]}"; do
 done
 # Also remove any stale dev app bundles nested inside Flutter builds.
 find "$(dirname "$0")/../../app/build" -name "$APP_NAME.app" -type d -exec rm -rf {} + 2>/dev/null || true
-# Kill stale app bundles from other repo clones (e.g. ~/omi-desktop/)
-# These confuse LaunchServices and get launched instead of the /Applications copy.
-find "$HOME" -maxdepth 4 -name "$APP_NAME.app" -type d -not -path "$APP_BUNDLE" -not -path "$APP_PATH" 2>/dev/null | while read stale; do
-    substep "Removing stale clone: $stale"
-    rm -rf "$stale"
+# Kill stale app bundles from common source checkouts. Scanning all of $HOME is
+# slow on machines with large caches or cloud folders and can block local builds.
+for stale_root in "$HOME/Source" "$HOME/Developer" "$HOME/Projects" "$HOME/omi-desktop"; do
+    [ -d "$stale_root" ] || continue
+    find "$stale_root" -maxdepth 4 -name "$APP_NAME.app" -type d -not -path "$APP_BUNDLE" -not -path "$APP_PATH" 2>/dev/null | while read stale; do
+        substep "Removing stale clone: $stale"
+        rm -rf "$stale"
+    done
 done
 
-if [ "${OMI_SKIP_TUNNEL:-0}" != "1" ]; then
+if [ "${OMI_LOCAL_ONLY:-0}" = "1" ]; then
+    substep "Skipping tunnel (OMI_LOCAL_ONLY=1)"
+elif [ "${OMI_SKIP_TUNNEL:-0}" != "1" ]; then
     step "Starting Cloudflare quick tunnel..."
     if command -v cloudflared >/dev/null 2>&1; then
         TUNNEL_LOG=$(mktemp /tmp/cloudflared-XXXXXX.log)
@@ -246,7 +264,7 @@ if [ ! -f ".env" ] && [ -f "../../backend/.env" ]; then
 elif [ ! -f ".env" ] && [ -f "../Backend/.env" ]; then
     cp "../Backend/.env" ".env"
 fi
-if [ ! -f ".env" ] && [ "$1" != "--yolo" ]; then
+if [ ! -f ".env" ] && [ "$1" != "--yolo" ] && [ "${OMI_LOCAL_ONLY:-0}" != "1" ]; then
     echo ""
     echo "=== First-time setup ==="
     echo "No .env file found at $BACKEND_DIR/.env"
@@ -294,7 +312,7 @@ export PORT="$BACKEND_PORT"
 
 # Validate credentials (needed for both backend and auth)
 CREDS_PATH="$BACKEND_DIR/google-credentials.json"
-if [ "${OMI_SKIP_BACKEND:-0}" != "1" ] && [ ! -f "$CREDS_PATH" ]; then
+if [ "${OMI_SKIP_BACKEND:-0}" != "1" ] && [ "${OMI_LOCAL_ONLY:-0}" != "1" ] && [ ! -f "$CREDS_PATH" ]; then
     echo "ERROR: Missing credentials file: $CREDS_PATH"
     echo ""
     echo "  Option A: Place your GCP service account key here:"
@@ -309,7 +327,7 @@ if [ -f "$CREDS_PATH" ]; then
 fi
 
 # Validate FIREBASE_PROJECT_ID (required unless yolo mode — no local backend)
-if [ -z "$FIREBASE_PROJECT_ID" ] && [ "${OMI_SKIP_BACKEND:-0}" != "1" ]; then
+if [ -z "$FIREBASE_PROJECT_ID" ] && [ "${OMI_SKIP_BACKEND:-0}" != "1" ] && [ "${OMI_LOCAL_ONLY:-0}" != "1" ]; then
     echo "ERROR: FIREBASE_PROJECT_ID is not set."
     echo ""
     echo "  Add to $BACKEND_DIR/.env:"
@@ -320,7 +338,13 @@ fi
 if [ -n "$FIREBASE_AUTH_PROJECT_ID" ]; then
     substep "Auth project: tokens validated against $FIREBASE_AUTH_PROJECT_ID, Firestore on $FIREBASE_PROJECT_ID"
 fi
-substep "Firebase project: $FIREBASE_PROJECT_ID | Backend port: $BACKEND_PORT"
+if [ "${OMI_LOCAL_ONLY:-0}" = "1" ]; then
+    export LOCAL_VLM_BASE_URL="${LOCAL_VLM_BASE_URL:-http://127.0.0.1:8000/v1}"
+    export LOCAL_VLM_MODEL="${LOCAL_VLM_MODEL:-Qwen/Qwen2.5-VL-3B-Instruct-AWQ}"
+    substep "Local-only mode: VLM=$LOCAL_VLM_MODEL at $LOCAL_VLM_BASE_URL | Backend port: $BACKEND_PORT"
+else
+    substep "Firebase project: $FIREBASE_PROJECT_ID | Backend port: $BACKEND_PORT"
+fi
 cd - > /dev/null
 
 # ─── Start Rust backend ───────────────────────────────────────────────
@@ -413,7 +437,15 @@ if [ -d "$ONNX_FRAMEWORK" ]; then
 fi
 
 # Copy libwebp dylibs and rewrite load paths
-WEBP_LIB="$(pkg-config --variable=libdir libwebp 2>/dev/null)/libwebp.7.dylib"
+WEBP_LIB=""
+if command -v pkg-config >/dev/null 2>&1; then
+    WEBP_LIB="$(pkg-config --variable=libdir libwebp 2>/dev/null)/libwebp.7.dylib"
+elif command -v brew >/dev/null 2>&1; then
+    WEBP_PREFIX="$(brew --prefix webp 2>/dev/null || true)"
+    if [ -n "$WEBP_PREFIX" ]; then
+        WEBP_LIB="$WEBP_PREFIX/lib/libwebp.7.dylib"
+    fi
+fi
 if [ -f "$WEBP_LIB" ]; then
     substep "Bundling libwebp"
     cp "$WEBP_LIB" "$APP_BUNDLE/Contents/Frameworks/libwebp.7.dylib"
@@ -492,6 +524,13 @@ else
     echo "OMI_DESKTOP_API_URL=$EFFECTIVE_API_URL" >> "$APP_BUNDLE/Contents/Resources/.env"
 fi
 substep "OMI_DESKTOP_API_URL=$EFFECTIVE_API_URL"
+if [ "${OMI_LOCAL_ONLY:-0}" = "1" ]; then
+    if grep -q "^OMI_LOCAL_ONLY=" "$APP_BUNDLE/Contents/Resources/.env"; then
+        sed -i '' "s|^OMI_LOCAL_ONLY=.*|OMI_LOCAL_ONLY=1|" "$APP_BUNDLE/Contents/Resources/.env"
+    else
+        echo "OMI_LOCAL_ONLY=1" >> "$APP_BUNDLE/Contents/Resources/.env"
+    fi
+fi
 # Bootstrap FIREBASE_API_KEY — check env var first (yolo mode), then backend .env
 if ! grep -q "^FIREBASE_API_KEY=" "$APP_BUNDLE/Contents/Resources/.env"; then
     FIREBASE_KEY="${FIREBASE_API_KEY:-}"
@@ -510,7 +549,10 @@ PYTHON_API_URL="${OMI_PYTHON_API_URL:-}"
 if [ -z "$PYTHON_API_URL" ] && [ -f "$BACKEND_DIR/.env" ]; then
     PYTHON_API_URL=$(grep "^OMI_PYTHON_API_URL=" "$BACKEND_DIR/.env" | head -1 | cut -d= -f2-)
 fi
-if [ -z "$PYTHON_API_URL" ]; then
+if [ -z "$PYTHON_API_URL" ] && [ "${OMI_LOCAL_ONLY:-0}" = "1" ]; then
+    PYTHON_API_URL="http://localhost:$BACKEND_PORT"
+    substep "OMI_PYTHON_API_URL not set — local-only mode points it to localhost"
+elif [ -z "$PYTHON_API_URL" ]; then
     PYTHON_API_URL="https://api.omi.me"
     substep "OMI_PYTHON_API_URL not set — defaulting to production: $PYTHON_API_URL"
 fi
@@ -623,6 +665,12 @@ if [ -n "$SIGN_IDENTITY" ]; then
     if [ "$USE_FALLBACK_ENTITLEMENTS" = true ]; then
         cp Desktop/Omi.entitlements /tmp/omi-local-dev.entitlements
         /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.applesignin" /tmp/omi-local-dev.entitlements 2>/dev/null || true
+        # Local named/ad-hoc bundles load third-party frameworks that are not
+        # signed by the same Apple team as the app. Keep hardened runtime, but
+        # disable library validation so dyld does not reject Sparkle/Sentry at
+        # launch with "different Team IDs".
+        /usr/libexec/PlistBuddy -c "Add :com.apple.security.cs.disable-library-validation bool true" /tmp/omi-local-dev.entitlements 2>/dev/null || \
+            /usr/libexec/PlistBuddy -c "Set :com.apple.security.cs.disable-library-validation true" /tmp/omi-local-dev.entitlements
         rm -f "$PROFILE_PATH"
         EFFECTIVE_ENTITLEMENTS="/tmp/omi-local-dev.entitlements"
     fi

@@ -88,6 +88,20 @@ pub struct FirestoreService {
 }
 
 impl FirestoreService {
+    /// Create a no-network placeholder for local-only MVP mode.
+    ///
+    /// Local-only routes do not touch Firestore, but AppState still carries the
+    /// service for the normal cloud-backed router shape.
+    pub fn local_placeholder(encryption_secret: Option<Vec<u8>>) -> Self {
+        Self {
+            client: Client::new(),
+            project_id: "local-only".to_string(),
+            credentials: None,
+            cached_token: Arc::new(RwLock::new(None)),
+            encryption_secret,
+        }
+    }
+
     /// Create a new Firestore service
     pub async fn new(
         project_id: String,

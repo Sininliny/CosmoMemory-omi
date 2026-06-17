@@ -45,6 +45,18 @@ class AuthState: ObservableObject {
   @Published var userEmail: String?
 
   private init() {
+    if DesktopBackendEnvironment.isLocalOnly {
+      self.isSignedIn = true
+      self.userEmail = "local@cosmomemory"
+      self.isRestoringAuth = false
+      UserDefaults.standard.set(true, forKey: Self.kAuthIsSignedIn)
+      UserDefaults.standard.set(self.userEmail, forKey: Self.kAuthUserEmail)
+      UserDefaults.standard.set("local", forKey: Self.kAuthUserId)
+      UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+      NSLog("OMI AuthState: Local-only mode initialized without Firebase auth")
+      return
+    }
+
     // Restore auth state from UserDefaults immediately on init (before UI renders)
     let savedSignedIn = UserDefaults.standard.bool(forKey: Self.kAuthIsSignedIn)
     let savedEmail = UserDefaults.standard.string(forKey: Self.kAuthUserEmail)
@@ -241,14 +253,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     log("AppDelegate: applicationDidFinishLaunching started (mode: \(OMIApp.launchMode.rawValue))")
     log("AppDelegate: AuthState.isSignedIn=\(AuthState.shared.isSignedIn)")
+    let isLocalOnly = DesktopBackendEnvironment.isLocalOnly
 
     // Refresh the "Auto" realtime-voice model pick from Artificial Analysis (daily, cached).
-    AutoModelSelector.shared.refreshIfStale()
+    if !isLocalOnly {
+      AutoModelSelector.shared.refreshIfStale()
+    }
 
     // Proactive notifications are now OFF by default for everyone. Run the one-time
     // migration before any assistant can fire, so existing users are flipped to Off
     // once (they can re-enable in Settings).
-    NotificationService.migrateToOffByDefaultIfNeeded()
+    if !isLocalOnly {
+      NotificationService.migrateToOffByDefaultIfNeeded()
+    }
 
     // Force macOS to use the correct app icon (bypasses icon cache).
     // Apply squircle mask with proper margins because NSApp.applicationIconImage
@@ -288,16 +305,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // Initialize NotificationService early to set up UNUserNotificationCenterDelegate
     // This ensures notifications display properly when app is in foreground
-    _ = NotificationService.shared
+    if !isLocalOnly {
+      _ = NotificationService.shared
+    }
 
     // Initialize Sparkle auto-updater early so the 10-minute check timer starts at launch
     // Without this, the updater only starts when the user opens Settings or clicks "Check for Updates"
-    _ = UpdaterViewModel.shared
-    UpdaterViewModel.shared.checkForUpdatesImmediatelyAfterLaunchIfNeeded()
+    if !isLocalOnly {
+      _ = UpdaterViewModel.shared
+      UpdaterViewModel.shared.checkForUpdatesImmediatelyAfterLaunchIfNeeded()
+    }
 
     // Initialize Sentry for crash reporting and error tracking (including dev builds)
     let isDev = AnalyticsManager.isDevBuild
-    SentrySDK.start { options in
+    if !isLocalOnly {
+      SentrySDK.start { options in
       options.dsn =
         "https://bbffa02d948c81ea4dccd36246c7bd20@o4511085999816704.ingest.us.sentry.io/4511086024851456"
       options.debug = false
@@ -375,25 +397,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return event
       }
     }
-    log("Sentry initialized (environment: \(isDev ? "development" : "production"))")
-
-    // Initialize Firebase
-    let plistPath = Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist")
-
-    if let path = plistPath,
-      let options = FirebaseOptions(contentsOfFile: path)
-    {
-      FirebaseApp.configure(options: options)
-      AuthService.shared.configure()
+      log("Sentry initialized (environment: \(isDev ? "development" : "production"))")
+    } else {
+      log("AppDelegate: Local-only mode — skipping Sentry and updater startup")
     }
 
-    // Initialize analytics (PostHog)
-    AnalyticsManager.shared.initialize()
-    AnalyticsManager.shared.detectAndReportCrash()
-    AnalyticsManager.shared.appLaunched()
+    if isLocalOnly {
+      log("AppDelegate: Local-only mode — skipping Firebase auth configuration")
+    } else {
+      // Initialize Firebase
+      let plistPath = Bundle.main.path(forResource: "GoogleService-Info", ofType: "plist")
+
+      if let path = plistPath,
+        let options = FirebaseOptions(contentsOfFile: path)
+      {
+        FirebaseApp.configure(options: options)
+        AuthService.shared.configure()
+      }
+    }
+
+    if !isLocalOnly {
+      // Initialize analytics (PostHog)
+      AnalyticsManager.shared.initialize()
+      AnalyticsManager.shared.detectAndReportCrash()
+      AnalyticsManager.shared.appLaunched()
+    }
 
     // Tier gating: migrate old boolean key to new 6-tier system
-    TierManager.migrateExistingUsersIfNeeded()
+    if !isLocalOnly {
+      TierManager.migrateExistingUsersIfNeeded()
+    }
 
     // All users get all features (tier 0 = show all)
     // Note: hasLaunchedBefore is also set by trackFirstLaunchIfNeeded(), but that
@@ -405,7 +438,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
       UserDefaults.standard.set(true, forKey: "userShowAllFeatures")
     }
 
-    AnalyticsManager.shared.trackFirstLaunchIfNeeded()
+    if !isLocalOnly {
+      AnalyticsManager.shared.trackFirstLaunchIfNeeded()
+    }
 
     // Set per-user database path before any async tasks can trigger DB initialization.
     // This is synchronous and must happen before TierManager / TranscriptionRetryService.
@@ -413,19 +448,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     RewindDatabase.currentUserId = (userId?.isEmpty == false) ? userId : "anonymous"
 
     // Start resource monitoring (memory, CPU, disk)
-    ResourceMonitor.shared.start()
+    if !isLocalOnly {
+      ResourceMonitor.shared.start()
+    }
 
     // Recover any pending/failed transcription sessions from previous runs
-    Task {
-      await TranscriptionRetryService.shared.recoverPendingTranscriptions()
-      TranscriptionRetryService.shared.start()
+    if !isLocalOnly {
+      Task {
+        await TranscriptionRetryService.shared.recoverPendingTranscriptions()
+        TranscriptionRetryService.shared.start()
+      }
     }
 
     // Start recurring task scheduler (checks every 60s for due tasks)
-    RecurringTaskScheduler.shared.start()
+    if !isLocalOnly {
+      RecurringTaskScheduler.shared.start()
+    }
 
     // Identify user if already signed in
-    if AuthState.shared.isSignedIn {
+    if AuthState.shared.isSignedIn && !isLocalOnly {
       AnalyticsManager.shared.identify()
       // Set Sentry user context (now enabled for dev builds too)
       if let email = AuthState.shared.userEmail {
@@ -1042,6 +1083,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
           name: .showUsageLimitPopup, object: nil, userInfo: ["reason": "trial_expired"])
         return
       }
+      ProactiveAssistantsPlugin.shared.refreshScreenRecordingPermission()
       if !ProactiveAssistantsPlugin.shared.hasScreenRecordingPermission {
         // No permission — revert toggle and open preferences
         sender.state = .off
@@ -1182,6 +1224,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Mark clean shutdown so next launch skips expensive DB integrity check
     RewindDatabase.markCleanShutdown()
 
+    guard !DesktopBackendEnvironment.isLocalOnly else { return }
+
     // Report final resources before termination
     ResourceMonitor.shared.reportResourcesNow(context: "app_terminating")
     ResourceMonitor.shared.stop()
@@ -1206,6 +1250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     NSLog("OMI AppDelegate: Received URL event: %@", urlString)
 
     Task { @MainActor in
+      guard !DesktopBackendEnvironment.isLocalOnly else { return }
       AuthService.shared.handleOAuthCallback(url: url)
       // Bring app to foreground after OAuth redirect — Safari stays in front otherwise.
       // NSApp.activate() alone doesn't switch macOS Spaces; ordering a window front does.
@@ -1338,6 +1383,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationDidBecomeActive(_ notification: Notification) {
+    guard !DesktopBackendEnvironment.isLocalOnly else { return }
+
     // Sync remote assistant settings so server-side changes take effect promptly
     Task { await SettingsSyncManager.shared.syncFromServer() }
   }

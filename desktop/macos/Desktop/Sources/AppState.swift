@@ -503,6 +503,14 @@ class AppState: ObservableObject {
     // Load API key from environment or .env file
     loadEnvironment()
 
+    if DesktopBackendEnvironment.isLocalOnly {
+      UserDefaults.standard.set(true, forKey: "auth_isSignedIn")
+      UserDefaults.standard.set("local@cosmomemory", forKey: "auth_userEmail")
+      UserDefaults.standard.set("local", forKey: "auth_userId")
+      UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
+      self.hasCompletedOnboarding = true
+    }
+
     // Setup lifecycle observers for saving conversations
     setupLifecycleObservers()
 
@@ -1132,6 +1140,7 @@ class AppState: ObservableObject {
 
   /// Check screen recording permission status
   func checkScreenRecordingPermission() {
+    ProactiveAssistantsPlugin.shared.refreshScreenRecordingPermission()
     let permissionGranted = ScreenCaptureService.checkPermission()
     hasScreenRecordingPermission = ScreenRecordingPermissionPolicy.uiPermissionGranted(
       tccGranted: permissionGranted)
@@ -3411,26 +3420,20 @@ class AppState: ObservableObject {
     OnboardingChatPersistence.clear()
     log("Cleared onboarding chat persistence")
 
-    // Clear knowledge graph (local + server) so the onboarding chart starts fresh
+    // Clear local knowledge graph so the onboarding chart starts fresh
     Task {
       await KnowledgeGraphStorage.shared.clearAll()
       log("Cleared local knowledge graph storage")
-      do {
-        try await APIClient.shared.deleteKnowledgeGraph()
-        log("Cleared server knowledge graph")
-      } catch {
-        logError("Failed to clear server knowledge graph during onboarding reset", error: error)
-      }
     }
 
-    // Clear persisted backend chat messages so onboarding does not resume old history.
+    // Clear local chat messages so onboarding does not resume old history.
     // Onboarding currently uses the default chat message stream.
     Task {
       do {
-        _ = try await APIClient.shared.deleteMessages()
-        log("Cleared backend chat messages")
+        _ = try await LocalChatStorage.shared.deleteMessages()
+        log("Cleared local chat messages")
       } catch {
-        logError("Failed to clear backend chat messages during onboarding reset", error: error)
+        logError("Failed to clear local chat messages during onboarding reset", error: error)
       }
     }
 

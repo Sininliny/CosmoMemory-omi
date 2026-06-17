@@ -50,9 +50,13 @@ struct DesktopHomeView: View {
     selectedIndex == SidebarNavItem.settings.rawValue
   }
 
+  private var requiresLoginAndOnboarding: Bool {
+    !DesktopBackendEnvironment.isLocalOnly
+  }
+
   var body: some View {
     Group {
-      if authState.isRestoringAuth {
+      if requiresLoginAndOnboarding && authState.isRestoringAuth {
         // State 0: Restoring auth session - show loading
         VStack(spacing: 16) {
           if let nsImage = Self.heroLogoImage {
@@ -69,13 +73,13 @@ struct DesktopHomeView: View {
         .onAppear {
           log("DesktopHomeView: Showing auth loading splash")
         }
-      } else if !authState.isSignedIn {
+      } else if requiresLoginAndOnboarding && !authState.isSignedIn {
         // State 1: Not signed in - show sign in
         SignInView(authState: authState)
           .onAppear {
             log("DesktopHomeView: Showing SignInView (not signed in)")
           }
-      } else if !appState.hasCompletedOnboarding {
+      } else if requiresLoginAndOnboarding && !appState.hasCompletedOnboarding {
         // State 2: Signed in but onboarding not complete
         if shouldSkipOnboarding() {
           Color.clear.onAppear {
@@ -135,6 +139,17 @@ struct DesktopHomeView: View {
             }
             .onAppear {
               log("DesktopHomeView: Showing mainContent (signed in and onboarded)")
+              if DesktopBackendEnvironment.isLocalOnly {
+                viewModelContainer.isInitialLoadComplete = true
+                log("DesktopHomeView: Local-only mode — skipping startup scans, syncs, and capture auto-start")
+                FloatingControlBarManager.shared.setup(
+                  appState: appState, chatProvider: viewModelContainer.chatProvider)
+                if FloatingControlBarManager.shared.isEnabled {
+                  FloatingControlBarManager.shared.show()
+                }
+                return
+              }
+
               // Check all permissions on launch
               appState.checkAllPermissions()
 
@@ -217,6 +232,8 @@ struct DesktopHomeView: View {
               }
             }
             .task {
+              guard !DesktopBackendEnvironment.isLocalOnly else { return }
+
               // Trigger eager data loading when main content appears
               // Load conversations/folders in parallel with other data
               async let vmLoad: Void = viewModelContainer.loadAllData()
@@ -231,25 +248,30 @@ struct DesktopHomeView: View {
             .onReceive(
               NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             ) { _ in
+              // Auto-start monitoring when returning to app if screen analysis is enabled
+              // but monitoring is not running. Handles the case where the user granted
+              // screen recording permission in System Settings and switched back.
+              let plugin = ProactiveAssistantsPlugin.shared
+              plugin.refreshScreenRecordingPermission()
+              appState.checkScreenRecordingPermission()
+              if AssistantSettings.shared.screenAnalysisEnabled && !plugin.isMonitoring {
+                if plugin.hasScreenRecordingPermission {
+                  log("DesktopHomeView: Permission available on app active — starting monitoring")
+                  plugin.startMonitoring { _, _ in }
+                }
+              }
+
+              guard !DesktopBackendEnvironment.isLocalOnly else { return }
+
               // Cooldown: only refresh conversations if last activation was 60+ seconds ago
               let now = Date()
               if PollingConfig.shouldAllowActivationRefresh(now: now, lastRefresh: lastActivationRefresh) {
                 lastActivationRefresh = now
                 Task { await appState.refreshConversations() }
               }
-              // Auto-start monitoring when returning to app if screen analysis is enabled
-              // but monitoring is not running. Handles the case where the user granted
-              // screen recording permission in System Settings and switched back.
-              let plugin = ProactiveAssistantsPlugin.shared
-              if AssistantSettings.shared.screenAnalysisEnabled && !plugin.isMonitoring {
-                plugin.refreshScreenRecordingPermission()
-                if plugin.hasScreenRecordingPermission {
-                  log("DesktopHomeView: Permission available on app active — starting monitoring")
-                  plugin.startMonitoring { _, _ in }
-                }
-              }
             }
             .onChange(of: apiKeyService.isLoaded) { loaded in
+              guard !DesktopBackendEnvironment.isLocalOnly else { return }
               guard loaded else { return }
               log("DesktopHomeView: API keys loaded — retrying deferred services")
               // Retry transcription
@@ -273,6 +295,7 @@ struct DesktopHomeView: View {
             }
             // Cmd+R: refresh all data (conversations, chat, tasks, memories)
             .onReceive(NotificationCenter.default.publisher(for: .refreshAllData)) { _ in
+              guard !DesktopBackendEnvironment.isLocalOnly else { return }
               Task { await appState.refreshConversations() }
             }
             // On sign-out: reset @AppStorage-backed onboarding flag and stop transcription.
@@ -310,6 +333,8 @@ struct DesktopHomeView: View {
             }
             // Periodic file re-scan (every 3 hours)
             .task {
+              guard !DesktopBackendEnvironment.isLocalOnly else { return }
+
               while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(3 * 60 * 60))
                 guard !Task.isCancelled else { break }
@@ -321,6 +346,8 @@ struct DesktopHomeView: View {
               }
             }
             .onReceive(NotificationCenter.default.publisher(for: .triggerFileIndexing)) { _ in
+              guard !DesktopBackendEnvironment.isLocalOnly else { return }
+
               // Background rescan — no loading screen needed
               Task {
                 log(
@@ -474,6 +501,7 @@ struct DesktopHomeView: View {
   }
 
   private var currentAppStateLabel: String {
+    if DesktopBackendEnvironment.isLocalOnly { return "main" }
     if authState.isRestoringAuth { return "restoring_auth" }
     if !authState.isSignedIn { return "signed_out" }
     if !appState.hasCompletedOnboarding { return "onboarding" }

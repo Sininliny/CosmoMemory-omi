@@ -1,5 +1,8 @@
 {
-  "unreleased": [],
+  "unreleased": [
+    "Added a local-only dementia MVP mode that routes chat and vision requests to a local VLM instead of cloud AI services",
+    "Kept desktop chat history local, removed cloud chat sharing/upload paths, and refreshed Screen Recording permission after granting access"
+  ],
   "releases": [
     {
       "version": "0.11.464",

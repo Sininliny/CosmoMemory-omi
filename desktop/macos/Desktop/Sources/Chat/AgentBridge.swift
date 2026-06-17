@@ -151,6 +151,7 @@ actor AgentBridge {
 
     // Pass harness mode to bridge (acp or piMono)
     env["HARNESS_MODE"] = harnessMode
+    let localOnly = env["OMI_LOCAL_ONLY"] == "1" || env["COSMO_LOCAL_ONLY"] == "1"
 
     // For piMono mode, inject the Firebase ID token so the bridge can
     // authenticate against POST /v2/chat/completions (which expects
@@ -159,6 +160,17 @@ actor AgentBridge {
     // SECURITY: if we can't get a Firebase token, refuse to start. The bridge
     // must NEVER fall back to ANTHROPIC_API_KEY as the Omi backend credential.
     if harnessMode == "piMono" {
+      let rustBase = await APIClient.shared.rustBackendURL
+      if rustBase.isEmpty {
+        log("AgentBridge: pi-mono start refused — OMI_DESKTOP_API_URL (Rust backend) not configured")
+        throw BridgeError.bridgeScriptNotFound
+      }
+
+      if localOnly {
+        env["OMI_API_BASE_URL"] = rustBase.hasSuffix("/") ? "\(rustBase)v2/local" : "\(rustBase)/v2/local"
+        env["OMI_API_KEY"] = "local"
+        log("AgentBridge: pi-mono local-only mode — routing chat to local VLM backend")
+      } else {
       let authService = await MainActor.run { AuthService.shared }
       let token: String
       do {
@@ -172,17 +184,12 @@ actor AgentBridge {
         throw BridgeError.authMissing
       }
       env["OMI_AUTH_TOKEN"] = token
+      env["OMI_API_KEY"] = token
       // Point pi-mono at the Rust desktop-backend's /v2/chat/completions proxy.
       // Without this, pi-mono-extension falls back to https://api.omi.me/v2 which
       // does NOT serve chat/completions — the shipped app would get 404 on every
       // prompt. rustBackendURL is baked at build time from OMI_DESKTOP_API_URL in .env.
-      let rustBase = await APIClient.shared.rustBackendURL
-      if !rustBase.isEmpty {
-        env["OMI_API_BASE_URL"] = rustBase.hasSuffix("/") ? "\(rustBase)v2" : "\(rustBase)/v2"
-      } else {
-        log("AgentBridge: pi-mono start refused — OMI_DESKTOP_API_URL (Rust backend) not configured")
-        throw BridgeError.bridgeScriptNotFound
-      }
+      env["OMI_API_BASE_URL"] = rustBase.hasSuffix("/") ? "\(rustBase)v2" : "\(rustBase)/v2"
 
       // BYOK: when the user runs on their own keys (free plan), forward all four
       // as env vars so the pi-mono extension can attach them as X-BYOK-* headers
@@ -199,6 +206,7 @@ actor AgentBridge {
           }
         }
         log("AgentBridge: pi-mono BYOK active — forwarding \(BYOKProvider.allCases.count) user keys as X-BYOK headers")
+      }
       }
     }
 

@@ -7143,6 +7143,11 @@ struct SettingsContentView: View {
     vadGateEnabled = AssistantSettings.shared.vadGateEnabled
     systemAudioCaptureMode = AssistantSettings.shared.systemAudioCaptureMode
 
+    guard !DesktopBackendEnvironment.isLocalOnly else {
+      isLoadingSettings = false
+      return
+    }
+
     Task {
       do {
         // Load all settings in parallel
