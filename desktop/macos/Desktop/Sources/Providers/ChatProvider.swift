@@ -914,8 +914,12 @@ BROWSER TABS: when you use the browser (Playwright), on your FIRST browser actio
             }
         }
         guard !agentBridgeStarted else { return true }
-        // Wait for API keys (Firebase, Calendar) before starting the bridge.
-        await APIKeyService.shared.waitForKeys()
+        // Wait for cloud API keys before starting the bridge. Local-only mode
+        // routes pi-mono to the local VLM backend and does not need Firebase or
+        // backend-served keys.
+        if !DesktopBackendEnvironment.isLocalOnly {
+            await APIKeyService.shared.waitForKeys()
+        }
         do {
             await preparePromptContextIfNeeded()
             try await agentBridge.start()
