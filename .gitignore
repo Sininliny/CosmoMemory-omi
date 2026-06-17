@@ -221,3 +221,4 @@ app/macos/Runner/LocalDev.entitlements
 # Generated browser snapshots (contain PII)
 builds-snapshot.md
 *-snapshot.md
+desktop/macos/Desktop/Sources/Chat/LocalChatStorage.swift
