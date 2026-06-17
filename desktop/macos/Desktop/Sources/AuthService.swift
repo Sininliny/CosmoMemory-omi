@@ -124,6 +124,14 @@ class AuthService {
     func configure() {
         guard !isConfigured else { return }
         isConfigured = true
+        guard !DesktopBackendEnvironment.isLocalOnly else {
+            isSignedIn = true
+            AuthState.shared.userEmail = "local@cosmomemory"
+            AuthState.shared.isRestoringAuth = false
+            saveAuthState(isSignedIn: true, email: AuthState.shared.userEmail, userId: "local")
+            NSLog("OMI AUTH: Local-only mode - skipped Firebase auth listener")
+            return
+        }
         restoreAuthState()
         setupAuthStateListener()
 
@@ -957,6 +965,10 @@ class AuthService {
     // MARK: - Get ID Token (for API calls)
 
     func getIdToken(forceRefresh: Bool = false) async throws -> String {
+        if DesktopBackendEnvironment.isLocalOnly {
+            return "local"
+        }
+
         // Get the expected user ID (the currently signed-in user)
         let expectedUserId = UserDefaults.standard.string(forKey: kAuthUserId)
 
